@@ -1,0 +1,274 @@
+export type JobStatus =
+  | "analyzing"
+  | "discovered"
+  | "ready"
+  | "queued"
+  | "downloading"
+  | "packaging"
+  | "completed"
+  | "failed"
+  | "partial"
+  | "cancelled";
+
+export type Quality = "360p" | "480p" | "720p" | "1080p";
+
+export type FileType = "video" | "audio" | "image" | "document" | "archive" | "other";
+
+export type AccessStatus =
+  | "ACCESSIBLE"
+  | "BLOCKED_403"
+  | "UNAUTHORIZED_401"
+  | "RATE_LIMITED_429"
+  | "NOT_FOUND_404"
+  | "SERVER_ERROR_5XX"
+  | "REDIRECT_ERROR"
+  | "TIMEOUT"
+  | "DNS_ERROR"
+  | "TLS_ERROR"
+  | "ROBOTS_RESTRICTED"
+  | "AUTHENTICATION_REQUIRED"
+  | "UNKNOWN";
+
+export type AnalysisStatus =
+  | "ANALYZING"
+  | "ACCESSIBLE"
+  | "PROTECTED"
+  | "BLOCKED"
+  | "AUTH_REQUIRED"
+  | "RATE_LIMITED"
+  | "NOT_FOUND"
+  | "SERVER_ERROR"
+  | "NO_MEDIA_FOUND"
+  | "MEDIA_FOUND"
+  | "PARTIAL"
+  | "COMPLETED";
+
+export type ErrorState =
+  | "ACCESS_BLOCKED"
+  | "NOT_DOWNLOADABLE"
+  | "AUTHENTICATION_REQUIRED"
+  | "RATE_LIMITED"
+  | "INVALID_URL"
+  | "NO_MEDIA_FOUND"
+  | "CRAWL_LIMIT_REACHED"
+  | "TIMEOUT"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
+export interface DiscoveredFile {
+  url: string;
+  name: string;
+  quality?: Quality;
+  fileType: FileType;
+  mimeType: string;
+  size?: number;
+  downloadable: boolean;
+  downloadBlocked?: string;
+  errorState?: ErrorState;
+  thumbnailUrl?: string;
+  duration?: string;
+}
+
+export interface CollectionResult {
+  title: string;
+  thumbnailUrl?: string;
+  sourceUrl: string;
+  files: DiscoveredFile[];
+  qualities: Quality[];
+  totalSize?: number;
+  metadata?: Record<string, string>;
+  collectionName?: string;
+  description?: string;
+}
+
+export interface CrawlStats {
+  pagesDiscovered: number;
+  pagesVisited: number;
+  pagesBlocked: number;
+  pagesFailed: number;
+}
+
+export interface FileStats {
+  discovered: number;
+  downloadable: number;
+  inaccessible: number;
+  unsupported: number;
+  totalSize: number;
+}
+
+export interface AccessDiagnostics {
+  accessStatus: AccessStatus;
+  httpStatus: number | null;
+  finalUrl: string;
+  contentType: string | null;
+  contentLength: number | null;
+  redirectCount: number;
+  robotsStatus: string | null;
+  serverHeaders: Record<string, string>;
+  tlsValid: boolean;
+  dnsResolved: boolean;
+  crawlStarted: boolean;
+}
+
+export interface AnalysisWarning {
+  code: string;
+  message: string;
+}
+
+export interface AnalysisResult {
+  jobId: string;
+  status: AnalysisStatus;
+  accessStatus: AccessStatus;
+  domain: string;
+  originalUrl: string;
+  finalUrl: string;
+  title: string | null;
+  description: string | null;
+  thumbnail: string | null;
+  crawl: CrawlStats;
+  files: DiscoveredFile[];
+  statistics: FileStats;
+  availableQualities: Quality[];
+  message: string;
+  details: AccessDiagnostics;
+  warnings: AnalysisWarning[];
+}
+
+export interface DownloadTaskData {
+  jobId: string;
+  fileId: string;
+  url: string;
+  fileName: string;
+  quality: Quality;
+  userId: string;
+}
+
+export interface JobProgress {
+  jobId: string;
+  status: JobStatus;
+  totalFiles: number;
+  completedFiles: number;
+  failedFiles: number;
+  totalBytes: number;
+  downloadedBytes: number;
+  currentFile?: string;
+  zipUrl?: string;
+  zipSize?: number;
+  error?: string;
+}
+
+export interface AnalyzeRequest {
+  url?: string;
+  search?: string;
+}
+
+export interface CreateJobRequest {
+  sourceUrl: string;
+  collectionTitle: string;
+  quality: Quality;
+  fileUrls: string[];
+  thumbnailUrl?: string;
+}
+
+export interface SourceAdapter {
+  name: string;
+  canHandle(url: string): boolean;
+  analyze(url: string): Promise<CollectionResult>;
+}
+
+export interface CrawlPage {
+  url: string;
+  depth: number;
+  html?: string;
+  title?: string;
+  links: string[];
+  resources: DiscoveredFile[];
+  metadata: Record<string, string>;
+}
+
+export interface CrawlResult {
+  entryUrl: string;
+  domain: string;
+  pagesVisited: number;
+  pages: CrawlPage[];
+  allResources: DiscoveredFile[];
+  collection: CollectionResult;
+}
+
+export interface SearchResult {
+  title: string;
+  url: string;
+  domain: string;
+  description: string;
+  thumbnailUrl?: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+  totalResults: number;
+}
+
+export interface SiteDiscoveryResult {
+  relatedUrls: string[];
+  paginationUrls: string[];
+  seriesUrls: string[];
+  title?: string;
+  description?: string;
+  metadata: Record<string, string>;
+}
+
+export interface UserIntent {
+  query: string | null;
+  sourceUrl: string;
+  requestedTitle: string | null;
+  requestedSeason: string | null;
+  requestedEpisodeRange: string | null;
+  requestedQuality: string | null;
+  derivedTitle: string | null;
+}
+
+export interface AIPageAnalysis {
+  pageType: "detail" | "collection" | "tag" | "category" | "episode" | "resource" | "unknown";
+  target: {
+    title: string | null;
+    season: number | null;
+    episodeRange: [number, number] | null;
+  };
+  relevantLinks: AIlinkRank[];
+  irrelevantLinks: AIlinkRank[];
+  collectionName: string | null;
+  description: string | null;
+  confidence: number;
+}
+
+export interface AIlinkRank {
+  url: string;
+  reason: string;
+  confidence: number;
+}
+
+export interface RelevanceScore {
+  url: string;
+  total: number;
+  semantic: number;
+  titleMatch: number;
+  seasonMatch: number;
+  anchorMatch: number;
+  structural: number;
+  decision: "QUEUE" | "SKIP" | "EXTRACT";
+  reason: string;
+}
+
+export interface PageContext {
+  url: string;
+  title: string | null;
+  metaDescription: string | null;
+  headings: string[];
+  breadcrumbs: string[];
+  links: Array<{ href: string; text: string }>;
+  structuredData: Record<string, unknown>[];
+  bodyText: string;
+  rawHtml: string;
+  metadata: Record<string, string>;
+}
