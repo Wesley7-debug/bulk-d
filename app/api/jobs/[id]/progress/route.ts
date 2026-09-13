@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "../../../../../auth";
 import { connectToDatabase } from "../../../../../lib/mongodb";
 import { Job } from "../../../../../db/models/Job";
+import { JobFile } from "../../../../../db/models/JobFile";
 
 export async function GET(
   request: NextRequest,
@@ -26,6 +27,22 @@ export async function GET(
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
+    const files = await JobFile.find({ jobId: id })
+      .select("fileName url downloaded failed error quality")
+      .lean();
+
+    const fileDetails = files.map((f) => ({
+      fileName: f.fileName,
+      url: f.url,
+      downloaded: f.downloaded,
+      failed: f.failed,
+      error: f.error || null,
+      quality: f.quality,
+    }));
+
+    const failedFiles = fileDetails.filter((f) => f.failed);
+    const succeededFiles = fileDetails.filter((f) => f.downloaded);
+
     return NextResponse.json({
       jobId: job.jobId,
       status: job.status,
@@ -37,6 +54,9 @@ export async function GET(
       zipUrl: job.zipUrl,
       zipSize: job.zipSize,
       error: job.error,
+      files: fileDetails,
+      failedFileDetails: failedFiles,
+      succeededFileDetails: succeededFiles,
     });
   } catch (error) {
     console.error("Error fetching progress:", error);

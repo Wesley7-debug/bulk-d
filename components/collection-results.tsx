@@ -147,7 +147,10 @@ function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
 }
 
 function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
-  const [selectedQuality, setSelectedQuality] = useState<Quality>("720p");
+  const availableQualities = analysis.availableQualities;
+  const [selectedQuality, setSelectedQuality] = useState<Quality>(
+    availableQualities.length > 0 ? availableQualities[availableQualities.length - 1] : "default"
+  );
   const downloadableFiles = analysis.files.filter((f) => f.downloadable);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(
     () => new Set(downloadableFiles.map((f) => f.url))
@@ -249,14 +252,14 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
         </Card>
       )}
 
-      {analysis.availableQualities.length > 0 && (
+      {availableQualities.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Quality</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex gap-2">
-              {(["360p", "480p", "720p", "1080p"] as Quality[]).map((q) => (
+              {availableQualities.map((q) => (
                 <Button
                   key={q}
                   variant={selectedQuality === q ? "default" : "outline"}
@@ -286,33 +289,58 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
         </CardHeader>
         <CardContent>
           <div className="max-h-96 space-y-2 overflow-y-auto">
-            {analysis.files.map((file) => (
-              <div
-                key={file.url}
-                className={`flex items-center gap-3 rounded-lg border p-3 ${
-                  file.downloadable
-                    ? "border-gray-700 hover:border-gray-600"
-                    : "border-gray-800 opacity-50"
-                }`}
-              >
-                <Checkbox
-                  checked={selectedFiles.has(file.url)}
-                  onCheckedChange={() => toggleFile(file.url)}
-                  disabled={!file.downloadable}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-white truncate">{file.name}</div>
-                  <div className="text-xs text-gray-500">
-                    {file.fileType} {file.size ? `\u00B7 ${formatBytes(file.size)}` : ""}
+            {analysis.files.map((file) => {
+              const isSeasonPack = file.isSeasonPack;
+              return (
+                <div
+                  key={file.url}
+                  className={`flex items-center gap-3 rounded-lg border p-3 ${
+                    isSeasonPack
+                      ? "border-amber-700/50 bg-amber-900/10"
+                      : file.downloadable
+                        ? "border-gray-700 hover:border-gray-600"
+                        : "border-gray-800 opacity-50"
+                  }`}
+                >
+                  <Checkbox
+                    checked={selectedFiles.has(file.url)}
+                    onCheckedChange={() => toggleFile(file.url)}
+                    disabled={!file.downloadable}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-white truncate">
+                      {isSeasonPack && <span className="text-amber-400 mr-1">📦</span>}
+                      {file.name}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {file.fileType} {file.size ? `\u00B7 ${formatBytes(file.size)}` : ""}
+                      {isSeasonPack && file.episodeRange && ` \u00B7 Episodes ${file.episodeRange}`}
+                      {isSeasonPack && " \u00B7 Season Pack"}
+                    </div>
                   </div>
+                  {file.quality && <Badge variant="outline">{file.quality}</Badge>}
+                  {isSeasonPack && <Badge variant="warning">Archive</Badge>}
+                  {!file.downloadable && (
+                    <Badge variant="destructive">{file.downloadBlocked || "Not available"}</Badge>
+                  )}
                 </div>
-                {file.quality && <Badge variant="outline">{file.quality}</Badge>}
-                {!file.downloadable && (
-                  <Badge variant="destructive">{file.downloadBlocked || "Not available"}</Badge>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
+          {(() => {
+            const packs = analysis.files.filter((f) => f.isSeasonPack);
+            const individuals = analysis.files.filter((f) => !f.isSeasonPack && f.downloadable);
+            const hasOverlap = packs.length > 0 && individuals.length > 0;
+            if (!hasOverlap) return null;
+            return (
+              <div className="mt-3 rounded-lg border border-yellow-800/50 bg-yellow-900/10 p-3">
+                <p className="text-xs text-yellow-300/80">
+                  Both season pack(s) and individual episodes are selected. You may be downloading duplicate content.
+                  Consider selecting only the season pack, or only individual episodes.
+                </p>
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
 

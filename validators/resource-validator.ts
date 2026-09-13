@@ -1,6 +1,7 @@
-import { DiscoveredFile, ErrorState } from "../types";
-import { MAX_FILE_SIZE_MB, BLOCKED_MIME_TYPES, BLOCKED_EXTENSIONS, DRM_PATTERNS, KNOWN_FILE_HOSTS, FILE_HOST_EXTENSIONS } from "../lib/constants";
-import { mapHttpStatusToErrorState } from "../lib/utils";
+import { DiscoveredFile, ErrorState, Quality } from "../types";
+import { MAX_FILE_SIZE_MB, BLOCKED_MIME_TYPES, BLOCKED_EXTENSIONS, DRM_PATTERNS, KNOWN_FILE_HOSTS, FILE_HOST_EXTENSIONS, EMBED_DOMAINS } from "../lib/constants";
+import { mapHttpStatusToErrorState, extractFilenameFromContentDisposition } from "../lib/utils";
+import { isEmbedUrl } from "../resolver/index";
 
 interface ValidationResult {
   downloadable: boolean;
@@ -8,28 +9,30 @@ interface ValidationResult {
   reason?: string;
   contentType?: string;
   contentLength?: number;
+  filename?: string;
+  quality?: Quality;
 }
 
 class ResourceValidator {
   async validateResource(file: DiscoveredFile): Promise<ValidationResult> {
     if (!this.isValidUrl(file.url)) {
-      return { downloadable: false, errorState: "INVALID_URL", reason: "Invalid URL" };
+      return { downloadable: false, errorState: "INVALID_URL", reason: "Invalid URL format" };
     }
 
     if (BLOCKED_MIME_TYPES.has(file.mimeType)) {
       return {
         downloadable: false,
         errorState: "NOT_DOWNLOADABLE",
-        reason: `Blocked MIME type: ${file.mimeType}`,
+        reason: `Blocked content type: ${file.mimeType}`,
       };
     }
 
-    const ext = file.url.split(".").pop()?.split("?")[0]?.toLowerCase() || "";
-    if (BLOCKED_EXTENSIONS.has(ext)) {
+    const ext = this.extractExtension(file.url);
+    if (ext && BLOCKED_EXTENSIONS.has(ext)) {
       return {
         downloadable: false,
         errorState: "NOT_DOWNLOADABLE",
-        reason: `Blocked file extension: ${ext}`,
+        reason: `Blocked file type: .${ext}`,
       };
     }
 
@@ -37,7 +40,7 @@ class ResourceValidator {
       return {
         downloadable: false,
         errorState: "NOT_DOWNLOADABLE",
-        reason: `File too large: ${file.size} bytes`,
+        reason: `File exceeds size limit: ${(file.size / (1024 * 1024)).toFixed(1)} MB`,
       };
     }
 
@@ -49,8 +52,16 @@ class ResourceValidator {
       };
     }
 
+    if (isEmbedUrl(file.url)) {
+      return {
+        downloadable: false,
+        errorState: "NOT_DOWNLOADABLE",
+        reason: "Embed/trailer URL — not a downloadable file",
+      };
+    }
+
     if (this.isKnownFileHostWithExtension(file.url)) {
-      return { downloadable: true, reason: "Known file host with media extension, HEAD skipped" };
+      return { downloadable: true, reason: "Known file host, HEAD skipped" };
     }
 
     const headResult = await this.headRequest(file.url);
@@ -91,6 +102,7 @@ class ResourceValidator {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "*/*",
         },
         redirect: "follow",
       });
@@ -99,19 +111,21 @@ class ResourceValidator {
 
       if (!response.ok) {
         const errorState = mapHttpStatusToErrorState(response.status);
+        const reason = this.getHumanReadableError(response.status, response.statusText);
         return {
           downloadable: false,
           errorState,
-          reason: `HTTP ${response.status}: ${response.statusText}`,
+          reason,
         };
       }
 
       const contentType = response.headers.get("content-type") || "";
+
       if (contentType.includes("text/html")) {
         return {
           downloadable: false,
           errorState: "NOT_DOWNLOADABLE",
-          reason: "URL returns HTML instead of media",
+          reason: "URL serves an HTML page instead of a downloadable file",
         };
       }
 
@@ -119,7 +133,7 @@ class ResourceValidator {
         return {
           downloadable: false,
           errorState: "NOT_DOWNLOADABLE",
-          reason: "URL returns JSON instead of media",
+          reason: "URL serves JSON data instead of a downloadable file",
         };
       }
 
@@ -128,10 +142,13 @@ class ResourceValidator {
         return {
           downloadable: false,
           errorState: "NOT_DOWNLOADABLE",
-          reason: `File too large: ${contentLength} bytes`,
+          reason: `File too large: ${(contentLength / (1024 * 1024)).toFixed(1)} MB`,
           contentLength,
         };
       }
+
+      const contentDisposition = response.headers.get("content-disposition");
+      const filename = extractFilenameFromContentDisposition(contentDisposition);
 
       return null;
     } catch (error) {
@@ -140,7 +157,7 @@ class ResourceValidator {
         return {
           downloadable: false,
           errorState: "TIMEOUT",
-          reason: "Request timed out",
+          reason: "Request timed out during validation",
         };
       }
       if (msg.includes("enotfound") || msg.includes("econnrefused")) {
@@ -151,6 +168,24 @@ class ResourceValidator {
         };
       }
       return null;
+    }
+  }
+
+  private getHumanReadableError(status: number, statusText: string): string {
+    switch (status) {
+      case 401:
+        return "Authentication required to access this resource";
+      case 403:
+        return "Access denied by the server";
+      case 404:
+        return "Resource not found on the server";
+      case 429:
+        return "Server is rate limiting requests";
+      default:
+        if (status >= 500) {
+          return "Server error preventing download";
+        }
+        return `HTTP ${status}: ${statusText}`;
     }
   }
 
@@ -178,6 +213,16 @@ class ResourceValidator {
       return isKnownHost && hasMediaExt;
     } catch {
       return false;
+    }
+  }
+
+  private extractExtension(url: string): string | null {
+    try {
+      const pathname = new URL(url).pathname;
+      const ext = pathname.split(".").pop()?.split("?")[0]?.toLowerCase();
+      return ext && ext !== pathname ? ext : null;
+    } catch {
+      return null;
     }
   }
 }

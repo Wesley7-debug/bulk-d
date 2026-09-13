@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { ErrorState } from "../types";
+import { ErrorState, CrawlPageType } from "../types";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -199,6 +199,56 @@ export function extractEpisodeNumber(name: string): number | null {
   for (const pattern of patterns) {
     const match = name.match(pattern);
     if (match) return parseInt(match[1], 10);
+  }
+  return null;
+}
+
+export function classifyPageType(
+  url: string,
+  html: string,
+  linkCount: number,
+  mediaCount: number
+): CrawlPageType {
+  const parsed = new URL(url);
+  const pathname = parsed.pathname.toLowerCase();
+  const search = parsed.search.toLowerCase();
+
+  if (/^https?:\/\/[^/]+\/?$/.test(url)) return "home";
+
+  if (/[?&]page=\d+/.test(search) || /\/page\/\d+/.test(pathname)) return "pagination";
+
+  if (/\.(mp4|webm|mkv|avi|mov|mp3|wav|pdf|zip|rar)$/i.test(pathname)) return "resource";
+
+  if (mediaCount > 0) return "detail";
+
+  if (/\/(watch|view|read|play|episode|video|item|post|article)/i.test(pathname)) return "detail";
+
+  if (/\/(category|categories|genre|tag|topic|subject)/i.test(pathname)) return "category";
+
+  if (linkCount > 15) return "listing";
+
+  if (/\/(browse|list|catalog|library|all|archive|index)/i.test(pathname)) return "listing";
+
+  if (/\/(search|query|find)/i.test(pathname)) return "search";
+
+  return "unknown";
+}
+
+export function extractFilenameFromContentDisposition(
+  contentDisposition: string | null
+): string | null {
+  if (!contentDisposition) return null;
+  const filenameStar = contentDisposition.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\s]+)/i);
+  if (filenameStar) {
+    try {
+      return decodeURIComponent(filenameStar[1].replace(/"/g, ""));
+    } catch {
+      return filenameStar[1].replace(/"/g, "");
+    }
+  }
+  const filenameMatch = contentDisposition.match(/filename\s*=\s*"?([^";\s]+)"?/i);
+  if (filenameMatch) {
+    return filenameMatch[1].replace(/"/g, "");
   }
   return null;
 }

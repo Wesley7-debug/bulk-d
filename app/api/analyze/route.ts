@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { analyzeUrl, searchAndAnalyze } from "../../../crawler/index";
+import { analyzeUrl } from "../../../crawler/index";
 import { auth } from "../../../auth";
 import { connectToDatabase } from "../../../lib/mongodb";
 import { isValidUrl } from "../../../lib/utils";
 import { logger } from "../../../lib/logger";
+import { searchProvider } from "../../../lib/search/search-provider";
 
 export async function POST(request: NextRequest) {
   try {
@@ -22,7 +23,7 @@ export async function POST(request: NextRequest) {
 
     if (search && !url) {
       try {
-        const searchResponse = await searchAndAnalyze(search, 10);
+        const searchResponse = await searchProvider.search(search, 10);
         return NextResponse.json({
           success: true,
           type: "search",
@@ -32,7 +33,10 @@ export async function POST(request: NextRequest) {
         const message =
           error instanceof Error ? error.message : "Search failed";
         logger.log("search", "RESULT", message);
-        return NextResponse.json({ error: message }, { status: 500 });
+        return NextResponse.json(
+          { success: true, type: "search", data: { query: search, results: [], totalResults: 0 } },
+          { status: 200 }
+        );
       }
     }
 

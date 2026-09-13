@@ -32,7 +32,7 @@ const JobSchema = new Schema<IJob>(
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     sourceUrl: { type: String, required: true },
     collectionTitle: { type: String, required: true },
-    quality: { type: String, enum: ["360p", "480p", "720p", "1080p"], required: true },
+    quality: { type: String, required: true },
     thumbnailUrl: { type: String },
     status: {
       type: String,

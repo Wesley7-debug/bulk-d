@@ -7,6 +7,15 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { formatBytes, getProgressPercent } from "../lib/utils";
 
+interface FileDetail {
+  fileName: string;
+  url: string;
+  downloaded: boolean;
+  failed: boolean;
+  error: string | null;
+  quality: string;
+}
+
 interface JobProgress {
   jobId: string;
   status: string;
@@ -18,6 +27,9 @@ interface JobProgress {
   zipUrl?: string;
   zipSize?: number;
   error?: string;
+  files?: FileDetail[];
+  failedFileDetails?: FileDetail[];
+  succeededFileDetails?: FileDetail[];
 }
 
 const statusColors: Record<string, string> = {
@@ -188,6 +200,33 @@ export function JobProgress({ jobId }: { jobId: string }) {
             <div className="text-sm">
               <span className="text-gray-500">ZIP Size: </span>
               <span className="text-white">{formatBytes(progress.zipSize)}</span>
+            </div>
+          )}
+
+          {progress.failedFileDetails && progress.failedFileDetails.length > 0 && (
+            <div className="rounded-lg border border-red-800/50 bg-red-900/10 p-3 space-y-2">
+              <h4 className="text-xs font-medium text-red-400">Failed Files ({progress.failedFileDetails.length})</h4>
+              <div className="max-h-40 space-y-1 overflow-y-auto">
+                {progress.failedFileDetails.map((f, i) => (
+                  <div key={i} className="text-xs text-red-300/80">
+                    <span className="font-medium">{f.fileName}</span>
+                    {f.error && <span className="text-red-400/60 ml-1">— {f.error}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {progress.succeededFileDetails && progress.succeededFileDetails.length > 0 && (
+            <div className="rounded-lg border border-green-800/30 bg-green-900/10 p-3 space-y-2">
+              <h4 className="text-xs font-medium text-green-400">Downloaded ({progress.succeededFileDetails.length})</h4>
+              <div className="max-h-40 space-y-1 overflow-y-auto">
+                {progress.succeededFileDetails.map((f, i) => (
+                  <div key={i} className="text-xs text-green-300/70">
+                    {f.fileName}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

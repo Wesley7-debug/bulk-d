@@ -28,7 +28,7 @@ const JobFileSchema = new Schema<IJobFile>(
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     url: { type: String, required: true },
     fileName: { type: String, required: true },
-    quality: { type: String, enum: ["360p", "480p", "720p", "1080p"], required: true },
+    quality: { type: String, required: true },
     fileType: {
       type: String,
       enum: ["video", "audio", "image", "document", "archive", "other"],

@@ -10,7 +10,7 @@ export type JobStatus =
   | "partial"
   | "cancelled";
 
-export type Quality = "360p" | "480p" | "720p" | "1080p";
+export type Quality = string;
 
 export type FileType = "video" | "audio" | "image" | "document" | "archive" | "other";
 
@@ -55,6 +55,37 @@ export type ErrorState =
   | "SERVER_ERROR"
   | "UNKNOWN";
 
+export type CrawlPageType =
+  | "home"
+  | "listing"
+  | "detail"
+  | "category"
+  | "tag"
+  | "search"
+  | "pagination"
+  | "resource"
+  | "unknown";
+
+export type PageClassification =
+  | "CONTENT_INDEX"
+  | "CONTENT_PAGE"
+  | "HOST_LANDING_PAGE"
+  | "DIRECT_RESOURCE";
+
+export type DiscoveryMethod =
+  | "meta-tags"
+  | "json-ld"
+  | "download-attribute"
+  | "media-elements"
+  | "media-links"
+  | "anchor-links"
+  | "iframe-src"
+  | "script-injected"
+  | "api-endpoint"
+  | "data-uri"
+  | "source-element"
+  | "object-embed";
+
 export interface DiscoveredFile {
   url: string;
   name: string;
@@ -67,6 +98,12 @@ export interface DiscoveredFile {
   errorState?: ErrorState;
   thumbnailUrl?: string;
   duration?: string;
+  discoveryMethod?: DiscoveryMethod;
+  sourcePage?: string;
+  contentDisposition?: string;
+  isSeasonPack?: boolean;
+  episodeRange?: string;
+  resolvedUrl?: string;
 }
 
 export interface CollectionResult {
@@ -271,4 +308,30 @@ export interface PageContext {
   bodyText: string;
   rawHtml: string;
   metadata: Record<string, string>;
+  pageType?: CrawlPageType;
+}
+
+export interface PageClassificationResult {
+  classification: PageClassification;
+  confidence: number;
+  reasons: string[];
+  scores: Record<PageClassification, number>;
+}
+
+export interface HostLink {
+  landingUrl: string;
+  filename: string | null;
+  fileSize: string | null;
+  confidence: number;
+  sourcePage: string;
+}
+
+export interface MediaResource {
+  url: string;
+  filename: string;
+  fileType: FileType;
+  mimeType: string;
+  size?: number;
+  resolutionStrategy: "static" | "adapter" | "headless" | "manual";
+  resolutionLog: string[];
 }

@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
-import { DiscoveredFile, FileType, Quality } from "../types";
-import { guessFileType, guessMimeType, normalizeUrl, extractEpisodeNumber } from "../lib/utils";
-import { DRM_PATTERNS, MEDIA_EXTENSIONS } from "../lib/constants";
+import { DiscoveredFile, FileType, Quality, DiscoveryMethod } from "../types";
+import { guessFileType, guessMimeType, normalizeUrl } from "../lib/utils";
+import { MEDIA_EXTENSIONS } from "../lib/constants";
 
 class DiscoveryEngine {
   async findDownloadableResources(
@@ -16,15 +16,19 @@ class DiscoveryEngine {
     candidates.push(...this.extractMediaElements($, baseUrl));
     candidates.push(...this.extractMediaLinks($, baseUrl));
     candidates.push(...this.extractAnchorLinks($, baseUrl));
+    candidates.push(...this.extractIframeSources($, baseUrl));
+    candidates.push(...this.extractSourceElements($, baseUrl));
+    candidates.push(...this.extractObjectEmbeds($, baseUrl));
+    candidates.push(...this.extractScriptInjectedUrls($, baseUrl));
 
     const seen = new Set<string>();
     const unique: DiscoveredFile[] = [];
     for (const file of candidates) {
-      const normalizedUrl = this.normalizeUrl(file.url, baseUrl);
-      if (!seen.has(normalizedUrl)) {
-        seen.add(normalizedUrl);
-        unique.push({ ...file, url: normalizedUrl });
-      }
+      const normalizedUrl = this.normalizeUrlSafe(file.url, baseUrl);
+      if (!normalizedUrl) continue;
+      if (seen.has(normalizedUrl)) continue;
+      seen.add(normalizedUrl);
+      unique.push({ ...file, url: normalizedUrl });
     }
 
     return unique;
@@ -33,33 +37,29 @@ class DiscoveryEngine {
   private extractMetaResources($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
     const files: DiscoveredFile[] = [];
 
-    $('meta[property="og:video"]').each((_, el) => {
-      const content = $(el).attr("content");
-      if (content) {
-        files.push(this.createFileEntry(content, baseUrl, "video"));
-      }
-    });
+    const metaSelectors = [
+      { selector: 'meta[property="og:video"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[property="og:video:url"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[property="og:video:secure_url"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[property="og:audio"]', type: "audio" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[property="og:audio:url"]', type: "audio" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[name="twitter:player:stream"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[name="twitter:player"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[itemprop="embedUrl"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+      { selector: 'meta[itemprop="contentUrl"]', type: "video" as FileType, method: "meta-tags" as DiscoveryMethod },
+    ];
 
-    $('meta[property="og:video:url"]').each((_, el) => {
-      const content = $(el).attr("content");
-      if (content) {
-        files.push(this.createFileEntry(content, baseUrl, "video"));
-      }
-    });
-
-    $('meta[property="og:audio"]').each((_, el) => {
-      const content = $(el).attr("content");
-      if (content) {
-        files.push(this.createFileEntry(content, baseUrl, "audio"));
-      }
-    });
-
-    $('meta[name="twitter:player:stream"]').each((_, el) => {
-      const content = $(el).attr("content");
-      if (content) {
-        files.push(this.createFileEntry(content, baseUrl, "video"));
-      }
-    });
+    for (const { selector, type, method } of metaSelectors) {
+      $(selector).each((_, el) => {
+        const content = $(el).attr("content");
+        if (content) {
+          const resolved = this.resolveUrl(content, baseUrl);
+          if (resolved) {
+            files.push(this.createFileEntry(resolved, baseUrl, type, method));
+          }
+        }
+      });
+    }
 
     return files;
   }
@@ -85,42 +85,49 @@ class DiscoveryEngine {
     baseUrl: string
   ): void {
     if (data.contentUrl) {
-      files.push(this.createFileEntry(String(data.contentUrl), baseUrl, "video"));
+      const url = this.resolveUrl(String(data.contentUrl), baseUrl);
+      if (url) files.push(this.createFileEntry(url, baseUrl, "video", "json-ld"));
     }
     if (data.embedUrl) {
-      files.push(this.createFileEntry(String(data.embedUrl), baseUrl, "video"));
+      const url = this.resolveUrl(String(data.embedUrl), baseUrl);
+      if (url) files.push(this.createFileEntry(url, baseUrl, "video", "json-ld"));
     }
     if (Array.isArray(data.encoding)) {
       for (const item of data.encoding) {
         if (item.contentUrl) {
-          files.push(this.createFileEntry(String(item.contentUrl), baseUrl, "video"));
+          const url = this.resolveUrl(String(item.contentUrl), baseUrl);
+          if (url) files.push(this.createFileEntry(url, baseUrl, "video", "json-ld"));
         }
       }
     }
     if (data.hasPart && Array.isArray(data.hasPart)) {
       for (const part of data.hasPart) {
         if (part.contentUrl) {
-          files.push(this.createFileEntry(String(part.contentUrl), baseUrl, "video"));
+          const url = this.resolveUrl(String(part.contentUrl), baseUrl);
+          if (url) files.push(this.createFileEntry(url, baseUrl, "video", "json-ld"));
         }
       }
     }
-    if (data["\@type"] === "VideoObject") {
+    if (data["@type"] === "VideoObject") {
       if (data.contentUrl) {
-        files.push(this.createFileEntry(String(data.contentUrl), baseUrl, "video"));
+        const url = this.resolveUrl(String(data.contentUrl), baseUrl);
+        if (url) files.push(this.createFileEntry(url, baseUrl, "video", "json-ld"));
       }
       if (data.thumbnailUrl) {
         const last = files[files.length - 1];
         if (last) last.thumbnailUrl = String(data.thumbnailUrl);
       }
     }
-    if (data["\@type"] === "AudioObject") {
+    if (data["@type"] === "AudioObject") {
       if (data.contentUrl) {
-        files.push(this.createFileEntry(String(data.contentUrl), baseUrl, "audio"));
+        const url = this.resolveUrl(String(data.contentUrl), baseUrl);
+        if (url) files.push(this.createFileEntry(url, baseUrl, "audio", "json-ld"));
       }
     }
-    if (data["\@type"] === "ImageObject") {
+    if (data["@type"] === "ImageObject") {
       if (data.contentUrl) {
-        files.push(this.createFileEntry(String(data.contentUrl), baseUrl, "image"));
+        const url = this.resolveUrl(String(data.contentUrl), baseUrl);
+        if (url) files.push(this.createFileEntry(url, baseUrl, "image", "json-ld"));
       }
     }
   }
@@ -131,8 +138,11 @@ class DiscoveryEngine {
     $("[download]").each((_, el) => {
       const href = $(el).attr("href");
       if (href) {
-        const type = guessFileType(href);
-        files.push(this.createFileEntry(href, baseUrl, type));
+        const resolved = this.resolveUrl(href, baseUrl);
+        if (resolved) {
+          const type = guessFileType(resolved);
+          files.push(this.createFileEntry(resolved, baseUrl, type, "download-attribute"));
+        }
       }
     });
 
@@ -145,17 +155,26 @@ class DiscoveryEngine {
     $("video source[src], video[src]").each((_, el) => {
       const src = $(el).attr("src");
       if (src) {
-        const entry = this.createFileEntry(src, baseUrl, "video");
-        const poster = $(el).closest("video").attr("poster");
-        if (poster) entry.thumbnailUrl = this.normalizeUrl(poster, baseUrl);
-        files.push(entry);
+        const resolved = this.resolveUrl(src, baseUrl);
+        if (resolved) {
+          const entry = this.createFileEntry(resolved, baseUrl, "video", "media-elements");
+          const poster = $(el).closest("video").attr("poster");
+          if (poster) {
+            const posterUrl = this.resolveUrl(poster, baseUrl);
+            if (posterUrl) entry.thumbnailUrl = posterUrl;
+          }
+          files.push(entry);
+        }
       }
     });
 
     $("audio source[src], audio[src]").each((_, el) => {
       const src = $(el).attr("src");
       if (src) {
-        files.push(this.createFileEntry(src, baseUrl, "audio"));
+        const resolved = this.resolveUrl(src, baseUrl);
+        if (resolved) {
+          files.push(this.createFileEntry(resolved, baseUrl, "audio", "media-elements"));
+        }
       }
     });
 
@@ -170,23 +189,30 @@ class DiscoveryEngine {
     $("a[href]").each((_, el) => {
       const href = $(el).attr("href");
       if (href && mediaExtensions.test(href)) {
-        const type = guessFileType(href);
-        const name = this.extractNameFromUrl(href);
-        const entry: DiscoveredFile = {
-          url: href,
-          name,
-          fileType: type,
-          mimeType: guessMimeType(href),
-          downloadable: false,
-        };
-        const linkText = $(el).text().trim();
-        const quality = this.guessQualityFromText(linkText) || this.guessQualityFromUrl(href);
-        if (quality) entry.quality = quality;
-        const parent = $(el).parent();
-        const nearestImg = parent.find("img").first().attr("src") ||
-          $(el).find("img").first().attr("src");
-        if (nearestImg) entry.thumbnailUrl = this.normalizeUrl(nearestImg, baseUrl);
-        files.push(entry);
+        const resolved = this.resolveUrl(href, baseUrl);
+        if (resolved) {
+          const type = guessFileType(resolved);
+          const name = this.extractNameFromUrl(resolved);
+          const entry: DiscoveredFile = {
+            url: resolved,
+            name,
+            fileType: type,
+            mimeType: guessMimeType(resolved),
+            downloadable: false,
+            discoveryMethod: "media-links",
+          };
+          const linkText = $(el).text().trim();
+          const quality = this.guessQualityFromText(linkText) || this.guessQualityFromUrl(resolved);
+          if (quality) entry.quality = quality;
+          const parent = $(el).parent();
+          const nearestImg = parent.find("img").first().attr("src") ||
+            $(el).find("img").first().attr("src");
+          if (nearestImg) {
+            const imgUrl = this.resolveUrl(nearestImg, baseUrl);
+            if (imgUrl) entry.thumbnailUrl = imgUrl;
+          }
+          files.push(entry);
+        }
       }
     });
 
@@ -200,15 +226,95 @@ class DiscoveryEngine {
       const href = $(el).attr("href");
       const download = $(el).attr("download");
       if (href && download) {
-        const type = guessFileType(href);
-        const name = download || this.extractNameFromUrl(href);
-        files.push({
-          url: href,
-          name,
-          fileType: type,
-          mimeType: guessMimeType(href),
-          downloadable: false,
-        });
+        const resolved = this.resolveUrl(href, baseUrl);
+        if (resolved) {
+          const type = guessFileType(resolved);
+          const name = download || this.extractNameFromUrl(resolved);
+          files.push({
+            url: resolved,
+            name,
+            fileType: type,
+            mimeType: guessMimeType(resolved),
+            downloadable: false,
+            discoveryMethod: "anchor-links",
+          });
+        }
+      }
+    });
+
+    return files;
+  }
+
+  private extractIframeSources($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
+    const files: DiscoveredFile[] = [];
+
+    $("iframe[src]").each((_, el) => {
+      const src = $(el).attr("src");
+      if (src) {
+        const resolved = this.resolveUrl(src, baseUrl);
+        if (resolved) {
+          const entry = this.createFileEntry(resolved, baseUrl, "video", "iframe-src");
+          entry.mimeType = "text/html";
+          files.push(entry);
+        }
+      }
+    });
+
+    return files;
+  }
+
+  private extractSourceElements($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
+    const files: DiscoveredFile[] = [];
+
+    $("source[src]").each((_, el) => {
+      const src = $(el).attr("src");
+      if (src) {
+        const resolved = this.resolveUrl(src, baseUrl);
+        if (resolved) {
+          const typeAttr = $(el).attr("type") || "";
+          let fileType: FileType = "other";
+          if (typeAttr.startsWith("video/")) fileType = "video";
+          else if (typeAttr.startsWith("audio/")) fileType = "audio";
+          else if (typeAttr.startsWith("image/")) fileType = "image";
+          else fileType = guessFileType(resolved);
+          files.push(this.createFileEntry(resolved, baseUrl, fileType, "source-element"));
+        }
+      }
+    });
+
+    return files;
+  }
+
+  private extractObjectEmbeds($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
+    const files: DiscoveredFile[] = [];
+
+    $("object[data], embed[src]").each((_, el) => {
+      const data = $(el).attr("data") || $(el).attr("src");
+      if (data) {
+        const resolved = this.resolveUrl(data, baseUrl);
+        if (resolved) {
+          files.push(this.createFileEntry(resolved, baseUrl, "video", "object-embed"));
+        }
+      }
+    });
+
+    return files;
+  }
+
+  private extractScriptInjectedUrls($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
+    const files: DiscoveredFile[] = [];
+    const mediaUrlPattern = /https?:\/\/[^\s"'<>]+\.(mp4|webm|mkv|avi|mov|mp3|wav|flac|m4a|ogg)(\?[^\s"'<>]*)?/gi;
+
+    $("script").each((_, el) => {
+      const text = $(el).html() || "";
+      let match;
+      while ((match = mediaUrlPattern.exec(text)) !== null) {
+        const url = match[0];
+        const resolved = this.resolveUrl(url, baseUrl);
+        if (resolved) {
+          const type = guessFileType(resolved);
+          files.push(this.createFileEntry(resolved, baseUrl, type, "script-injected"));
+        }
       }
     });
 
@@ -218,7 +324,8 @@ class DiscoveryEngine {
   private createFileEntry(
     url: string,
     baseUrl: string,
-    fileType: FileType
+    fileType: FileType,
+    method: DiscoveryMethod
   ): DiscoveredFile {
     return {
       url,
@@ -226,6 +333,7 @@ class DiscoveryEngine {
       fileType,
       mimeType: guessMimeType(url),
       downloadable: false,
+      discoveryMethod: method,
     };
   }
 
@@ -264,11 +372,19 @@ class DiscoveryEngine {
     return undefined;
   }
 
-  private normalizeUrl(url: string, baseUrl: string): string {
+  private resolveUrl(url: string, baseUrl: string): string | null {
     try {
       return new URL(url, baseUrl).href;
     } catch {
-      return url;
+      return null;
+    }
+  }
+
+  private normalizeUrlSafe(url: string, baseUrl: string): string | null {
+    try {
+      return normalizeUrl(url, baseUrl);
+    } catch {
+      return null;
     }
   }
 }

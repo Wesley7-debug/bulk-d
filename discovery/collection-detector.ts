@@ -1,4 +1,4 @@
-import { DiscoveredFile, CollectionResult } from "../types";
+import { DiscoveredFile, CollectionResult, Quality } from "../types";
 import { extractEpisodeNumber, naturalSort, extractDomain } from "../lib/utils";
 
 class CollectionDetector {
@@ -13,6 +13,7 @@ class CollectionDetector {
     const qualities = this.extractAvailableQualities(resources);
     const totalSize = resources.reduce((sum, f) => sum + (f.size || 0), 0) || undefined;
     const thumbnailUrl = this.findBestThumbnail(resources, metadata);
+    const description = metadata?.description || metadata?.["og:description"] || undefined;
 
     return {
       title: collectionName,
@@ -23,7 +24,34 @@ class CollectionDetector {
       totalSize,
       metadata: metadata || {},
       collectionName,
+      description,
     };
+  }
+
+  groupByFileType(resources: DiscoveredFile[]): Record<string, DiscoveredFile[]> {
+    const groups: Record<string, DiscoveredFile[]> = {};
+    for (const file of resources) {
+      const key = file.fileType;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(file);
+    }
+    return groups;
+  }
+
+  groupByQuality(resources: DiscoveredFile[]): Map<Quality, DiscoveredFile[]> {
+    const groups = new Map<Quality, DiscoveredFile[]>();
+    for (const file of resources) {
+      if (file.quality) {
+        const existing = groups.get(file.quality) || [];
+        existing.push(file);
+        groups.set(file.quality, existing);
+      }
+    }
+    return groups;
+  }
+
+  findFilesForQuality(resources: DiscoveredFile[], quality: Quality): DiscoveredFile[] {
+    return resources.filter((f) => f.quality === quality && f.downloadable);
   }
 
   private sortResourcesNatural(resources: DiscoveredFile[]): DiscoveredFile[] {
@@ -55,13 +83,13 @@ class CollectionDetector {
     return "Untitled Collection";
   }
 
-  private extractAvailableQualities(resources: DiscoveredFile[]): ("360p" | "480p" | "720p" | "1080p")[] {
+  private extractAvailableQualities(resources: DiscoveredFile[]): Quality[] {
     const qualitySet = new Set<string>();
     for (const file of resources) {
       if (file.quality) qualitySet.add(file.quality);
     }
-    const allQualities = ["360p", "480p", "720p", "1080p"] as const;
-    if (qualitySet.size === 0) return [...allQualities];
+    const allQualities: Quality[] = ["360p", "480p", "720p", "1080p"];
+    if (qualitySet.size === 0) return allQualities;
     return allQualities.filter((q) => qualitySet.has(q));
   }
 
@@ -70,6 +98,7 @@ class CollectionDetector {
     metadata?: Record<string, string>
   ): string | undefined {
     if (metadata?.thumbnail) return metadata.thumbnail;
+    if (metadata?.["og:image"]) return metadata["og:image"];
     for (const file of resources) {
       if (file.thumbnailUrl) return file.thumbnailUrl;
       if (file.fileType === "image" && file.url) return file.url;

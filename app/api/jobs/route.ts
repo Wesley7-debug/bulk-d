@@ -6,7 +6,8 @@ import { JobFile } from "../../../db/models/JobFile";
 import { User } from "../../../db/models/User";
 import { generateJobId } from "../../../lib/utils";
 import { addDownloadJob } from "../../../queue/index";
-import { MAX_FILES_PER_JOB } from "../../../lib/constants";
+import { MAX_FILES_PER_JOB, EMBED_DOMAINS } from "../../../lib/constants";
+import { isEmbedUrl } from "../../../resolver/index";
 
 export async function GET(request: NextRequest) {
   try {
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
     console.error("Error fetching jobs:", error);
     return NextResponse.json(
       { error: "Failed to fetch jobs" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
@@ -42,19 +43,43 @@ export async function POST(request: NextRequest) {
     await connectToDatabase();
 
     const body = await request.json();
-    const { sourceUrl, collectionTitle, quality, fileUrls, thumbnailUrl } = body;
+    const { sourceUrl, collectionTitle, quality, fileUrls, thumbnailUrl } =
+      body;
 
     if (!sourceUrl || !collectionTitle || !quality || !fileUrls?.length) {
       return NextResponse.json(
         { error: "Missing required fields" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     if (fileUrls.length > MAX_FILES_PER_JOB) {
       return NextResponse.json(
         { error: `Too many files. Maximum is ${MAX_FILES_PER_JOB}` },
-        { status: 400 }
+        { status: 400 },
+      );
+    }
+
+    const validFileUrls = fileUrls.filter((fileData: any) => {
+      const fileUrl = typeof fileData === "string" ? fileData : fileData.url;
+      if (isEmbedUrl(fileUrl)) {
+        return false;
+      }
+      try {
+        const hostname = new URL(fileUrl).hostname.toLowerCase();
+        if (EMBED_DOMAINS.some((d) => hostname.includes(d))) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      return true;
+    });
+
+    if (validFileUrls.length === 0) {
+      return NextResponse.json(
+        { error: "No valid downloadable files selected (embeds/trailers were filtered out)" },
+        { status: 400 },
       );
     }
 
@@ -68,14 +93,14 @@ export async function POST(request: NextRequest) {
       quality,
       thumbnailUrl,
       status: "queued",
-      totalFiles: fileUrls.length,
+      totalFiles: validFileUrls.length,
     });
 
     const userId = session.user.id!;
 
     // Create file records
     const fileRecords = await Promise.all(
-      fileUrls.map(async (fileData: any) => {
+      validFileUrls.map(async (fileData: any) => {
         const fileUrl = typeof fileData === "string" ? fileData : fileData.url;
         const fileName =
           typeof fileData === "string"
@@ -92,7 +117,7 @@ export async function POST(request: NextRequest) {
           mimeType: "video/mp4",
           selected: true,
         });
-      })
+      }),
     );
 
     // Update user job count
@@ -113,7 +138,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Update job status
-    await Job.findOneAndUpdate({ jobId }, { status: "downloading", startedAt: new Date() });
+    await Job.findOneAndUpdate(
+      { jobId },
+      { status: "downloading", startedAt: new Date() },
+    );
 
     return NextResponse.json({
       success: true,
@@ -124,7 +152,7 @@ export async function POST(request: NextRequest) {
     console.error("Error creating job:", error);
     return NextResponse.json(
       { error: "Failed to create job" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
