@@ -367,7 +367,9 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
     };
 
     es.onerror = () => {
-      es.close();
+      if (es.readyState === EventSource.CLOSED) {
+        es.close();
+      }
     };
   }, [jobId, resolutionStarted]);
 
@@ -406,13 +408,14 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
   const handleSingleDownload = useCallback(async (file: DiscoveredFile) => {
     const fileId = getFileId(file);
     const ep = episodeMap.get(fileId);
+    if (!ep || ep.status !== "resolved") return;
     setDownloadingId(fileId);
     setError("");
 
     try {
-      const url = ep?.downloadUrl || file.resolvedUrl;
+      const url = ep.downloadUrl || file.resolvedUrl;
       if (url) {
-        triggerBrowserDownload(url, ep?.filename || getDisplayName(file, 0));
+        triggerBrowserDownload(url, ep.filename || getDisplayName(file, 0));
       } else {
         await proxyDownload(file);
       }
@@ -424,14 +427,18 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
   }, [episodeMap]);
 
   const handleDownloadAll = useCallback(async () => {
-    if (downloadableFiles.length === 0) return;
+    const resolvedEpisodes = downloadableFiles.filter((file) => {
+      const ep = episodeMap.get(getFileId(file));
+      return ep?.status === "resolved" && (ep?.downloadUrl || file.resolvedUrl);
+    });
+    if (resolvedEpisodes.length === 0) return;
 
     setError("");
     setStatusMsg("");
     setDownloadingId("all");
 
-    for (let i = 0; i < downloadableFiles.length; i++) {
-      const file = downloadableFiles[i];
+    for (let i = 0; i < resolvedEpisodes.length; i++) {
+      const file = resolvedEpisodes[i];
       const fileId = getFileId(file);
       const ep = episodeMap.get(fileId);
       setDownloadingId(fileId);
@@ -445,13 +452,13 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
       } catch {
         // skip failed files silently
       }
-      if (i < downloadableFiles.length - 1) {
+      if (i < resolvedEpisodes.length - 1) {
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
 
     setDownloadingId(null);
-    setStatusMsg(`All ${downloadableFiles.length} file(s) download started`);
+    setStatusMsg(`All ${resolvedEpisodes.length} file(s) download started`);
     setTimeout(() => setStatusMsg(""), 4000);
   }, [downloadableFiles, episodeMap]);
 
@@ -512,12 +519,12 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
                   Resolving download links...
                 </div>
                 <div className="text-xs text-gray-500 mt-1">
-                  {resolvedCount + failedCount} / {episodeMap.size} resolved
+                  {resolvedCount} / {episodeMap.size} resolved
                   {failedCount > 0 && ` (${failedCount} failed)`}
                 </div>
               </div>
               <div className="text-xs text-gray-500">
-                {resolvedCount + failedCount}/{episodeMap.size}
+                {resolvedCount}/{episodeMap.size}
               </div>
             </div>
           </CardContent>
@@ -664,7 +671,7 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8 shrink-0"
-                      disabled={isDownloading || isFailed || isResolving || (!resolvedUrl && !file.resolvedUrl)}
+                      disabled={isDownloading || isFailed || isResolving || ep?.status !== "resolved"}
                       onClick={() => handleSingleDownload(file)}
                       title={`Download ${displayName}`}
                     >
@@ -709,7 +716,7 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
 
       <Button
         onClick={handleDownloadAll}
-        disabled={downloadableFiles.length === 0 || downloadingId === "all"}
+        disabled={resolvedCount === 0 || downloadingId === "all"}
         size="lg"
         className="w-full rounded-xl bg-white text-black font-medium hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
       >
@@ -719,7 +726,7 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
             Downloading...
           </span>
         ) : (
-          `Download ${downloadableFiles.length} File${downloadableFiles.length !== 1 ? "s" : ""}`
+          `Download ${resolvedCount} Episode${resolvedCount !== 1 ? "s" : ""}`
         )}
       </Button>
     </div>
