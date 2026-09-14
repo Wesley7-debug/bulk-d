@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
-import { HostLink, MediaResource, DiscoveredFile, FileType, UserIntent } from "../types";
-import { normalizeUrl } from "../lib/utils";
+import type { BrowserContext, Page } from "playwright";
+import { HostLink, MediaResource, FileType, UserIntent, HostLinkResolveResult } from "../types";
+import { normalizeUrlSafe } from "../lib/utils";
 import {
   HOST_FILE_SIZE_PATTERN,
   HOST_FILENAME_PATTERN,
@@ -10,14 +11,308 @@ import {
   RESOLVE_MAX_HOPS,
   RESOLVE_TIMEOUT_MS,
   HEADLESS_TIMEOUT_MS,
-  COOLDOWN_MAX_WAIT_MS,
   DOWNLOAD_EVENT_TIMEOUT_MS,
   TITLE_MATCH_THRESHOLD,
 } from "../lib/constants";
-import { classifyPage, detectHostLandingPage } from "./page-classifier";
+import { detectHostLandingPage } from "./page-classifier";
 import { logger } from "../lib/logger";
 
 const MEDIA_EXT_REGEX = /\.(mp4|webm|mkv|avi|mov|wmv|flv|webm|mp3|wav|flac|aac|ogg|m4a|zip|rar|7z|pdf)(?:\?[^"'\s]*)?$/i;
+const RESOLVER_OVERALL_TIMEOUT_MS = Math.max(HEADLESS_TIMEOUT_MS + 15_000, 45_000);
+const HTML_CONTENT_TYPES = ["text/html", "application/xhtml+xml"];
+const ERROR_CONTENT_TYPES = ["application/json", "text/plain", "application/xml", "text/xml"];
+const MEDIA_CONTENT_TYPES = [
+  "video/",
+  "audio/",
+  "application/zip",
+  "application/x-rar",
+  "application/x-7z",
+  "application/x-tar",
+  "application/gzip",
+  "application/vnd.rar",
+  "application/x-7z-compressed",
+];
+
+interface HttpInspection {
+  url: string;
+  status: number;
+  ok: boolean;
+  contentType: string;
+  contentLength?: number;
+  contentDisposition: string;
+  classification: "media" | "html_intermediary" | "challenge" | "login" | "error" | "unknown";
+  reason?: string;
+  bodyText?: string;
+}
+
+interface HeadlessResolveResult {
+  resource: MediaResource | null;
+  reason?: string;
+}
+
+interface CapturedResponse {
+  url: string;
+  contentType: string;
+  contentDisposition: string;
+  status: number;
+  contentLength: number;
+}
+
+function parseContentLength(value: string | null | undefined): number | undefined {
+  const parsed = parseInt(value || "0", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function isHtmlContentType(contentType: string): boolean {
+  const lower = contentType.toLowerCase();
+  return HTML_CONTENT_TYPES.some((ct) => lower.includes(ct));
+}
+
+function isErrorContentType(contentType: string): boolean {
+  const lower = contentType.toLowerCase();
+  return ERROR_CONTENT_TYPES.some((ct) => lower.includes(ct));
+}
+
+function isVerifiedMediaResponse(contentType: string, contentDisposition: string): boolean {
+  const lowerCt = contentType.toLowerCase();
+  const lowerDisposition = contentDisposition.toLowerCase();
+  if (/attachment/.test(lowerDisposition)) return true;
+  if (lowerCt.includes("application/octet-stream")) return /attachment/.test(lowerDisposition);
+  return MEDIA_CONTENT_TYPES.some((ct) => lowerCt.includes(ct));
+}
+
+function classifyHtmlBody(bodyText: string): HttpInspection["classification"] {
+  const lower = bodyText.toLowerCase();
+  if (/\b(captcha|recaptcha|hcaptcha|cloudflare|challenge|verify you are human|checking your browser)\b/.test(lower)) {
+    return "challenge";
+  }
+  if (/\b(sign in|log in|login|required authentication|account required|password)\b/.test(lower)) {
+    return "login";
+  }
+  if (/\b(not found|file removed|expired|server error|access denied|forbidden)\b/.test(lower)) {
+    return "error";
+  }
+  return "html_intermediary";
+}
+
+async function inspectHttpResponse(
+  url: string,
+  jobId: string,
+  requestHeaders?: Record<string, string>
+): Promise<HttpInspection> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "*/*",
+        Range: "bytes=0-0",
+        ...requestHeaders,
+      },
+      redirect: "follow",
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const contentDisposition = response.headers.get("content-disposition") || "";
+    const contentLength = parseContentLength(response.headers.get("content-length"));
+    const finalUrl = response.url || url;
+
+    if (!response.ok) {
+      return {
+        url: finalUrl,
+        status: response.status,
+        ok: false,
+        contentType,
+        contentLength,
+        contentDisposition,
+        classification: "error",
+        reason: `http_${response.status}`,
+      };
+    }
+
+    if (isVerifiedMediaResponse(contentType, contentDisposition)) {
+      const bodyBytes = await response.arrayBuffer().then((ab) => Buffer.from(ab)).catch(() => null);
+
+      if (bodyBytes && bodyBytes.length > 0) {
+        const head = bodyBytes.slice(0, 512).toString("utf-8").toLowerCase().trim();
+        if (
+          head.startsWith("<!doctype") || head.startsWith("<html") ||
+          head.startsWith("<head") || head.startsWith("<body") ||
+          head.startsWith("<script") || head.startsWith("<!--") ||
+          head.startsWith("<?xml")
+        ) {
+          const bodyText = bodyBytes.toString("utf-8");
+          const classification = classifyHtmlBody(bodyText);
+          return {
+            url: finalUrl,
+            status: response.status,
+            ok: true,
+            contentType,
+            contentLength,
+            contentDisposition,
+            classification,
+            reason: `claimed_media_but_html_body_${classification}`,
+            bodyText: bodyText.substring(0, 2000),
+          };
+        }
+      }
+
+      await response.body?.cancel().catch(() => {});
+      return {
+        url: finalUrl,
+        status: response.status,
+        ok: true,
+        contentType: contentType || "application/octet-stream",
+        contentLength,
+        contentDisposition,
+        classification: "media",
+      };
+    }
+
+    if (isHtmlContentType(contentType)) {
+      const bodyText = await response.text();
+      const classification = classifyHtmlBody(bodyText);
+      return {
+        url: finalUrl,
+        status: response.status,
+        ok: true,
+        contentType,
+        contentLength,
+        contentDisposition,
+        classification,
+        reason: classification === "html_intermediary" ? "html_intermediary" : `${classification}_detected`,
+        bodyText,
+      };
+    }
+
+    if (MEDIA_EXT_REGEX.test(finalUrl) && !isErrorContentType(contentType)) {
+      const bodyBytes = await response.arrayBuffer().then((ab) => Buffer.from(ab)).catch(() => null);
+      if (bodyBytes && bodyBytes.length > 0) {
+        const head = bodyBytes.slice(0, 512).toString("utf-8").toLowerCase().trim();
+        if (
+          head.startsWith("<!doctype") || head.startsWith("<html") ||
+          head.startsWith("<head") || head.startsWith("<body") ||
+          head.startsWith("<script") || head.startsWith("<!--") ||
+          head.startsWith("<?xml")
+        ) {
+          const bodyText = bodyBytes.toString("utf-8");
+          const classification = classifyHtmlBody(bodyText);
+          return {
+            url: finalUrl,
+            status: response.status,
+            ok: true,
+            contentType,
+            contentLength,
+            contentDisposition,
+            classification,
+            reason: `media_extension_but_html_body_${classification}`,
+            bodyText: bodyText.substring(0, 2000),
+          };
+        }
+        return {
+          url: finalUrl,
+          status: response.status,
+          ok: true,
+          contentType: contentType || "application/octet-stream",
+          contentLength,
+          contentDisposition,
+          classification: "media",
+        };
+      }
+    }
+
+    await response.body?.cancel().catch(() => {});
+    return {
+      url: finalUrl,
+      status: response.status,
+      ok: true,
+      contentType,
+      contentLength,
+      contentDisposition,
+      classification: isErrorContentType(contentType) ? "error" : "unknown",
+      reason: isErrorContentType(contentType) ? "non_media_error_response" : "unverified_content_type",
+    };
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : "unknown";
+    logger.log(jobId, "RESOLVE", `status=failed reason=${reason}`);
+    return {
+      url,
+      status: 0,
+      ok: false,
+      contentType: "",
+      contentDisposition: "",
+      classification: "error",
+      reason,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildBrowserSessionHeaders(
+  context: BrowserContext,
+  url: string,
+  referer?: string
+): Promise<Record<string, string>> {
+  const cookies = await context.cookies(url).catch(() => []);
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Accept: "*/*",
+    "Accept-Encoding": "identity",
+  };
+  if (referer) headers.Referer = referer;
+  if (cookies.length > 0) {
+    headers.Cookie = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  }
+  return headers;
+}
+
+async function verifyBrowserSessionDownload(
+  context: BrowserContext,
+  url: string,
+  jobId: string,
+  resolutionLog: string[],
+  referer?: string,
+  suggestedFilename?: string
+): Promise<MediaResource | null> {
+  const requestHeaders = await buildBrowserSessionHeaders(context, url, referer);
+  const inspection = await inspectHttpResponse(url, jobId, requestHeaders);
+
+  resolutionLog.push(`RESOLVE final_content_type=${inspection.contentType || "unknown"}`);
+  resolutionLog.push(`RESOLVE final_url=${inspection.url}`);
+  logger.log(jobId, "RESOLVE", `final_content_type=${inspection.contentType || "unknown"}`);
+  logger.log(jobId, "RESOLVE", `final_url=${inspection.url}`);
+
+  if (inspection.classification !== "media") {
+    const reason = inspection.reason || inspection.classification || "no_download_response";
+    resolutionLog.push(`RESOLVE status=failed reason=${reason}`);
+    logger.log(jobId, "RESOLVE", `status=failed reason=${reason}`);
+    return null;
+  }
+
+  const filename = suggestedFilename
+    || extractFilenameFromDisposition(inspection.contentDisposition)
+    || extractFilenameFromUrl(inspection.url);
+  resolutionLog.push("RESOLVE status=success");
+  logger.log(jobId, "RESOLVE", `status=success final_url=${inspection.url}`, {
+    finalContentType: inspection.contentType,
+    contentLength: inspection.contentLength,
+  });
+
+  return {
+    url: inspection.url,
+    filename,
+    fileType: guessFileTypeFromMime(inspection.contentType),
+    mimeType: inspection.contentType,
+    size: inspection.contentLength,
+    requestHeaders,
+    resolutionStrategy: "headless",
+    resolutionLog,
+  };
+}
 
 let chromium: typeof import("playwright")["chromium"] | null = null;
 async function getChromium() {
@@ -249,15 +544,31 @@ export function detectHostLinks(
   }
 
   for (const link of allLinks) {
-    let resolved: string;
-    try {
-      resolved = normalizeUrl(link.href, pageUrl);
-    } catch {
+    const resolved = normalizeUrlSafe(link.href, pageUrl);
+    if (!resolved) {
+      logger.log(jobId, "HOST_DETECT", "url_rejected", {
+        rawHref: link.href,
+        baseUrl: pageUrl,
+        normalizedUrl: null,
+        reason: "INVALID_URL",
+      });
       continue;
     }
 
-    const linkHost = new URL(resolved).hostname.toLowerCase();
-    const pageHost = new URL(pageUrl).hostname.toLowerCase();
+    let linkHost: string;
+    let pageHost: string;
+    try {
+      linkHost = new URL(resolved).hostname.toLowerCase();
+      pageHost = new URL(pageUrl).hostname.toLowerCase();
+    } catch {
+      logger.log(jobId, "HOST_DETECT", "url_rejected", {
+        rawHref: link.href,
+        baseUrl: pageUrl,
+        normalizedUrl: resolved,
+        reason: "URL_PARSE_FAILED",
+      });
+      continue;
+    }
     if (linkHost === pageHost) continue;
 
     const linkHlp = (() => {
@@ -295,77 +606,64 @@ export async function resolveStatic(
   const resolutionLog: string[] = [];
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
+    logger.log(jobId, "RESOLVE", `source_url=${url}`);
+    const inspection = await inspectHttpResponse(url, jobId);
 
-    const response = await fetch(url, {
-      method: "HEAD",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-      redirect: "follow",
+    resolutionLog.push(`RESOLVE initial_status=${inspection.status}`);
+    resolutionLog.push(`RESOLVE initial_content_type=${inspection.contentType || "unknown"}`);
+    resolutionLog.push(`RESOLVE classification=${inspection.classification}`);
+    logger.log(jobId, "RESOLVE", `initial_status=${inspection.status}`);
+    logger.log(jobId, "RESOLVE", `initial_content_type=${inspection.contentType || "unknown"}`);
+    logger.log(jobId, "RESOLVE", `classification=${inspection.classification}`, {
+      finalUrl: inspection.url,
+      contentLength: inspection.contentLength,
+      contentDisposition: inspection.contentDisposition,
     });
 
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      resolutionLog.push(`RESOLVE_STATIC status=failed http_status=${response.status}`);
-      logger.log(jobId, "RESOLVE", `strategy=direct_typed_link status=failed http_status=${response.status}`);
+    if (!inspection.ok) {
+      resolutionLog.push(`RESOLVE status=failed reason=${inspection.reason || "http_error"}`);
+      logger.log(jobId, "RESOLVE", `status=failed reason=${inspection.reason || "http_error"}`);
       return null;
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    const contentLength = parseInt(response.headers.get("content-length") || "0") || undefined;
-    const contentDisposition = response.headers.get("content-disposition") || "";
-
-    if (contentType.includes("video/") || contentType.includes("audio/")
-        || contentType.includes("application/octet-stream")
-        || contentType.includes("application/zip")
-        || contentType.includes("application/x-rar")) {
-      const filename = extractFilenameFromDisposition(contentDisposition)
-        || extractFilenameFromUrl(url);
-      resolutionLog.push(`RESOLVE_STATIC strategy=direct_typed_link status=ok content_type=${contentType}`);
-      logger.log(jobId, "RESOLVE", `strategy=direct_typed_link status=ok url=${url}`, {
-        contentType,
+    if (inspection.classification === "media") {
+      const filename = extractFilenameFromDisposition(inspection.contentDisposition)
+        || extractFilenameFromUrl(inspection.url);
+      resolutionLog.push(`RESOLVE strategy=direct_typed_link final_content_type=${inspection.contentType}`);
+      resolutionLog.push(`RESOLVE final_url=${inspection.url}`);
+      resolutionLog.push("RESOLVE status=success");
+      logger.log(jobId, "RESOLVE", `strategy=direct_typed_link status=success final_url=${inspection.url}`, {
+        finalContentType: inspection.contentType,
+        contentLength: inspection.contentLength,
         filename,
       });
       return {
-        url: response.url || url,
+        url: inspection.url,
         filename,
-        fileType: guessFileTypeFromMime(contentType),
-        mimeType: contentType,
-        size: contentLength,
+        fileType: guessFileTypeFromMime(inspection.contentType),
+        mimeType: inspection.contentType,
+        size: inspection.contentLength,
         resolutionStrategy: "static",
         resolutionLog,
       };
     }
 
-    if (contentType.includes("text/html")) {
-      let htmlBody = "";
-      try {
-        const getController = new AbortController();
-        const getTimeout = setTimeout(() => getController.abort(), RESOLVE_TIMEOUT_MS);
-        const getResp = await fetch(url, {
-          signal: getController.signal,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          },
-          redirect: "follow",
-        });
-        clearTimeout(getTimeout);
-        htmlBody = await getResp.text();
-      } catch {
-        return null;
-      }
-      const $ = cheerio.load(htmlBody);
+    if (inspection.classification === "challenge" || inspection.classification === "login" || inspection.classification === "error") {
+      const reason = inspection.reason || `${inspection.classification}_detected`;
+      resolutionLog.push(`RESOLVE status=failed reason=${reason}`);
+      logger.log(jobId, "RESOLVE", `status=failed reason=${reason}`);
+      return null;
+    }
+
+    if (inspection.classification === "html_intermediary" && inspection.bodyText) {
+      const $ = cheerio.load(inspection.bodyText);
 
       const metaRefresh = $('meta[http-equiv="refresh"]').attr("content");
       if (metaRefresh) {
         const urlMatch = metaRefresh.match(/url=(.+)/i);
         if (urlMatch) {
           let refreshUrl = urlMatch[1].trim();
-          try { refreshUrl = new URL(refreshUrl, url).href; } catch { /* use as-is */ }
+          try { refreshUrl = new URL(refreshUrl, inspection.url).href; } catch { /* use as-is */ }
           resolutionLog.push(`RESOLVE_STATIC strategy=meta_refresh hop=1 target=${refreshUrl}`);
           logger.log(jobId, "RESOLVE", `strategy=meta_refresh hop=1 target=${refreshUrl}`);
           const nested = await resolveStatic(refreshUrl, jobId);
@@ -381,22 +679,34 @@ export async function resolveStatic(
         || $('meta[property="og:video:secure_url"]').attr("content");
       if (ogVideo) {
         let videoUrl = ogVideo;
-        try { videoUrl = new URL(ogVideo, url).href; } catch { /* use as-is */ }
+        try { videoUrl = new URL(ogVideo, inspection.url).href; } catch { /* use as-is */ }
         resolutionLog.push(`RESOLVE_STATIC strategy=og_video url=${videoUrl}`);
         logger.log(jobId, "RESOLVE", `strategy=og_video url=${videoUrl}`);
-        return {
-          url: videoUrl,
-          filename: extractFilenameFromUrl(videoUrl),
-          fileType: "video",
-          mimeType: "video/mp4",
-          resolutionStrategy: "static",
-          resolutionLog,
-        };
+        const nested = await resolveStatic(videoUrl, jobId);
+        if (nested) {
+          nested.resolutionLog.unshift(...resolutionLog);
+          return nested;
+        }
+      }
+
+      const mediaLinks = $('a[href]').toArray()
+        .map((el) => $(el).attr("href") || "")
+        .filter((href) => MEDIA_EXT_REGEX.test(href));
+      for (const link of mediaLinks) {
+        let resolved: string;
+        try { resolved = new URL(link, inspection.url).href; } catch { continue; }
+        resolutionLog.push(`RESOLVE_STATIC strategy=media_link url=${resolved}`);
+        logger.log(jobId, "RESOLVE", `strategy=media_link url=${resolved}`);
+        const nested = await resolveStatic(resolved, jobId);
+        if (nested) {
+          nested.resolutionLog.unshift(...resolutionLog);
+          return nested;
+        }
       }
     }
 
-    resolutionLog.push(`RESOLVE_STATIC strategy=direct_typed_link status=not_media content_type=${contentType}`);
-    logger.log(jobId, "RESOLVE", `strategy=direct_typed_link status=not_media content_type=${contentType}`);
+    resolutionLog.push(`RESOLVE status=failed reason=${inspection.reason || inspection.classification}`);
+    logger.log(jobId, "RESOLVE", `status=failed reason=${inspection.reason || inspection.classification}`);
     return null;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
@@ -409,15 +719,20 @@ export async function resolveStatic(
 async function resolveViaHeadless(
   landingUrl: string,
   jobId: string
-): Promise<MediaResource | null> {
+): Promise<HeadlessResolveResult> {
   const pw = await getChromium();
   if (!pw) {
     logger.log(jobId, "RESOLVE", "strategy=headless status=skipped reason=playwright_not_available");
-    return null;
+    return { resource: null, reason: "playwright_not_available" };
   }
 
   const resolutionLog: string[] = [];
   let browser = null;
+  const fail = (reason: string): HeadlessResolveResult => {
+    resolutionLog.push(`RESOLVE status=failed reason=${reason}`);
+    logger.log(jobId, "RESOLVE", `status=failed reason=${reason}`);
+    return { resource: null, reason };
+  };
 
   try {
     browser = await pw.launch({
@@ -461,19 +776,19 @@ async function resolveViaHeadless(
       return mediaMimes.some((m) => ct.includes(m));
     };
 
-    const capturedResponses: Array<{ url: string; contentType: string; status: number; contentLength: number }> = [];
+    const capturedResponses: CapturedResponse[] = [];
 
     page.on("response", async (response) => {
       const ct = response.headers()["content-type"] || "";
       const cl = parseInt(response.headers()["content-length"] || "0") || 0;
       const status = response.status();
       const rUrl = response.url();
+      const disposition = response.headers()["content-disposition"] || "";
 
-      capturedResponses.push({ url: rUrl, contentType: ct, status, contentLength: cl });
+      capturedResponses.push({ url: rUrl, contentType: ct, contentDisposition: disposition, status, contentLength: cl });
 
       if (mediaUrl) return;
 
-      const disposition = response.headers()["content-disposition"] || "";
       const hasAttachmentDisposition = /attachment/i.test(disposition);
 
       if ((isMediaResponse(ct, disposition) || hasAttachmentDisposition) && status >= 200 && status < 400) {
@@ -499,12 +814,31 @@ async function resolveViaHeadless(
     resolutionLog.push(`RESOLVE strategy=headless hop=0 loading=${landingUrl}`);
     logger.log(jobId, "RESOLVE", `strategy=headless hop=0 loading=${landingUrl}`);
 
+    logger.log(jobId, "RESOLVE", "strategy=headless wait_until=domcontentloaded");
     await page.goto(landingUrl, {
-      waitUntil: "networkidle",
+      waitUntil: "domcontentloaded",
       timeout: HEADLESS_TIMEOUT_MS,
     });
 
     await page.waitForTimeout(2000);
+
+    const pageClassification = await page.evaluate(() => {
+      const text = document.body?.textContent?.toLowerCase() || "";
+      if (/\b(captcha|recaptcha|hcaptcha|cloudflare|challenge|verify you are human|checking your browser)\b/.test(text)) {
+        return "challenge_detected";
+      }
+      if (/\b(sign in|log in|login|required authentication|account required|password)\b/.test(text)) {
+        return "login_required";
+      }
+      if (/\b(not found|file removed|expired|server error|access denied|forbidden)\b/.test(text)) {
+        return "error_page";
+      }
+      return "html_intermediary";
+    }).catch(() => "html_intermediary");
+    logger.log(jobId, "RESOLVE", `classification=${pageClassification}`);
+    if (pageClassification !== "html_intermediary") {
+      return fail(pageClassification);
+    }
 
     // If media appeared on initial load, return it
     if (mediaUrl) {
@@ -514,15 +848,9 @@ async function resolveViaHeadless(
         contentType: mediaContentType,
         contentLength: mediaContentLength,
       });
-      return {
-        url: mediaUrl,
-        filename: extractFilenameFromUrl(mediaUrl),
-        fileType: guessFileTypeFromMime(mediaContentType || ""),
-        mimeType: mediaContentType || "video/mp4",
-        size: mediaContentLength || undefined,
-        resolutionStrategy: "headless",
-        resolutionLog,
-      };
+      const verified = await verifyBrowserSessionDownload(context, mediaUrl, jobId, resolutionLog, landingUrl);
+      if (verified) return { resource: verified };
+      return fail("no_download_response");
     }
 
     // ===== COOLDOWN DETECTION =====
@@ -555,9 +883,7 @@ async function resolveViaHeadless(
     // ===== CTA CLICKING WITH DOWNLOAD EVENT RACING =====
     const clicked = await clickDownloadCta(page, landingUrl, jobId, resolutionLog);
     if (!clicked) {
-      resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=failed reason=no_download_cta`);
-      logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=failed reason=no_download_cta`);
-      return null;
+      return fail("no_download_cta");
     }
     hopCount++;
 
@@ -578,7 +904,7 @@ async function resolveViaHeadless(
       logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok download_event_url=${cdnUrl.substring(0, 150)}`);
 
       // The download event URL is the CDN URL — extract filename from it
-      return {
+      const mediaResource: MediaResource = {
         url: cdnUrl,
         filename: download.suggestedFilename() || extractFilenameFromUrl(cdnUrl),
         fileType: guessFileTypeFromUrl(cdnUrl),
@@ -586,6 +912,7 @@ async function resolveViaHeadless(
         resolutionStrategy: "headless",
         resolutionLog,
       };
+      return { resource: mediaResource };
     }
 
     // No download event — check if media appeared via response listener
@@ -596,7 +923,7 @@ async function resolveViaHeadless(
         contentType: mediaContentType,
         contentLength: mediaContentLength,
       });
-      return {
+      const mediaResource: MediaResource = {
         url: mediaUrl,
         filename: extractFilenameFromUrl(mediaUrl),
         fileType: guessFileTypeFromMime(mediaContentType || ""),
@@ -605,6 +932,7 @@ async function resolveViaHeadless(
         resolutionStrategy: "headless",
         resolutionLog,
       };
+      return { resource: mediaResource };
     }
 
     // Check if URL changed (page navigated to a new page)
@@ -644,7 +972,7 @@ async function resolveViaHeadless(
             const cdnUrl2 = download2.url();
             resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok download_event_url=${cdnUrl2.substring(0, 150)}`);
             logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok download_event_url=${cdnUrl2.substring(0, 150)}`);
-            return {
+            const mediaResource: MediaResource = {
               url: cdnUrl2,
               filename: download2.suggestedFilename() || extractFilenameFromUrl(cdnUrl2),
               fileType: guessFileTypeFromUrl(cdnUrl2),
@@ -652,6 +980,7 @@ async function resolveViaHeadless(
               resolutionStrategy: "headless",
               resolutionLog,
             };
+            return { resource: mediaResource };
           }
         }
       }
@@ -659,13 +988,13 @@ async function resolveViaHeadless(
 
     // ===== FALLBACK: Check captured responses for media =====
     const responseMedia = capturedResponses.find((r) =>
-      isMediaResponse(r.contentType) && r.status >= 200 && r.status < 400
+      isMediaResponse(r.contentType, "") && r.status >= 200 && r.status < 400
     );
     if (responseMedia) {
       hopCount++;
       resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok captured_response=${responseMedia.url.substring(0, 150)}`);
       logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok captured_response=${responseMedia.url.substring(0, 150)}`);
-      return {
+      const mediaResource: MediaResource = {
         url: responseMedia.url,
         filename: extractFilenameFromUrl(responseMedia.url),
         fileType: guessFileTypeFromMime(responseMedia.contentType),
@@ -674,6 +1003,7 @@ async function resolveViaHeadless(
         resolutionStrategy: "headless",
         resolutionLog,
       };
+      return { resource: mediaResource };
     }
 
     // ===== FALLBACK: Check page HTML for media URLs =====
@@ -690,7 +1020,7 @@ async function resolveViaHeadless(
         hopCount++;
         resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok media_in_page=${foundUrl}`);
         logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok media_in_page=${foundUrl}`);
-        return {
+        const mediaResource: MediaResource = {
           url: foundUrl,
           filename: extractFilenameFromUrl(foundUrl),
           fileType: guessFileTypeFromUrl(foundUrl),
@@ -698,6 +1028,7 @@ async function resolveViaHeadless(
           resolutionStrategy: "headless",
           resolutionLog,
         };
+        return { resource: mediaResource };
       }
 
       const ogVideo = $('meta[property="og:video"]').attr("content")
@@ -709,7 +1040,7 @@ async function resolveViaHeadless(
         hopCount++;
         resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok og_video=${videoUrl}`);
         logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok og_video=${videoUrl}`);
-        return {
+        const mediaResource: MediaResource = {
           url: videoUrl,
           filename: extractFilenameFromUrl(videoUrl),
           fileType: "video",
@@ -717,6 +1048,7 @@ async function resolveViaHeadless(
           resolutionStrategy: "headless",
           resolutionLog,
         };
+        return { resource: mediaResource };
       }
 
       const pageLinks = await page.$$('a[href]');
@@ -728,7 +1060,7 @@ async function resolveViaHeadless(
           hopCount++;
           resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok link_media=${resolved}`);
           logger.log(jobId, "RESOLVE", `strategy=headless hop=${hopCount} status=ok link_media=${resolved}`);
-          return {
+          const mediaResource: MediaResource = {
             url: resolved,
             filename: extractFilenameFromUrl(resolved),
             fileType: guessFileTypeFromUrl(resolved),
@@ -736,6 +1068,7 @@ async function resolveViaHeadless(
             resolutionStrategy: "headless",
             resolutionLog,
           };
+          return { resource: mediaResource };
         }
       }
 
@@ -747,7 +1080,7 @@ async function resolveViaHeadless(
         const popupResult = await resolveStatic(popupUrl, jobId);
         if (popupResult) {
           popupResult.resolutionLog.unshift(...resolutionLog);
-          return popupResult;
+          return { resource: popupResult };
         }
       }
     }
@@ -757,12 +1090,12 @@ async function resolveViaHeadless(
       capturedResponseCount: capturedResponses.length,
       capturedTypes: capturedResponses.slice(0, 10).map((r) => ({ url: r.url.substring(0, 80), ct: r.contentType, status: r.status })),
     });
-    return null;
+    return fail("no_media_found");
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
     resolutionLog.push(`RESOLVE strategy=headless status=error reason=${msg}`);
     logger.log(jobId, "RESOLVE", `strategy=headless status=error reason=${msg}`);
-    return null;
+    return fail(msg);
   } finally {
     if (browser) {
       try { await browser.close(); } catch { /* ignore */ }
@@ -776,7 +1109,7 @@ async function resolveViaHeadless(
  * Returns true if a click was attempted.
  */
 async function clickDownloadCta(
-  page: any,
+  page: Page,
   pageUrl: string,
   jobId: string,
   resolutionLog: string[]
@@ -789,7 +1122,7 @@ async function clickDownloadCta(
     const onclick = await el.getAttribute("onclick") || "";
     const dataHref = await el.getAttribute("data-href") || "";
     const className = await el.getAttribute("class") || "";
-    const disabled = await el.evaluate((e: any) => e.disabled).catch(() => false);
+    const disabled = await el.evaluate((e: Element) => "disabled" in e && Boolean((e as HTMLButtonElement).disabled)).catch(() => false);
 
     if (disabled) continue;
 
@@ -812,13 +1145,13 @@ async function clickDownloadCta(
         resolutionLog.push(`RESOLVE strategy=headless cta_data_href=${resolved.substring(0, 100)}`);
         logger.log(jobId, "RESOLVE", `strategy=headless cta_data_href=${resolved.substring(0, 100)}`);
         // Store the resolved URL on the page for the caller to pick up
-        await page.evaluate((url: string) => { (window as any).__mediaHref = url; }, resolved);
+        await page.evaluate((url: string) => { (window as Window & { __mediaHref?: string }).__mediaHref = url; }, resolved);
         return true;
       }
 
       // Use evaluate to trigger JS onclick handlers (critical for loadedfiles pattern)
       try {
-        await el.evaluate((e: any) => { e.click(); });
+        await el.evaluate((e: Element) => { (e as HTMLElement).click(); });
         resolutionLog.push(`RESOLVE strategy=headless clicked_cta="${text.substring(0, 40)}"`);
         logger.log(jobId, "RESOLVE", `strategy=headless clicked_cta="${text.substring(0, 40)}"`);
         return true;
@@ -831,8 +1164,7 @@ async function clickDownloadCta(
   if (anyClickable) {
     try {
       const href = await anyClickable.getAttribute("href") || "";
-      const text = (await anyClickable.textContent())?.trim()?.substring(0, 40) || "first_link";
-      await anyClickable.evaluate((e: any) => { e.click(); });
+      await anyClickable.evaluate((e: Element) => { (e as HTMLElement).click(); });
       resolutionLog.push(`RESOLVE strategy=headless clicked_first_link href="${href.substring(0, 60)}"`);
       logger.log(jobId, "RESOLVE", `strategy=headless clicked_first_link href="${href.substring(0, 60)}"`);
       return true;
@@ -845,17 +1177,46 @@ async function clickDownloadCta(
 export async function resolveHostLink(
   hostLink: HostLink,
   jobId: string
-): Promise<MediaResource | null> {
+): Promise<HostLinkResolveResult> {
   logger.log(jobId, "RESOLVE", `resolving host_link=${hostLink.landingUrl} filename=${hostLink.filename}`);
 
   const staticResult = await resolveStatic(hostLink.landingUrl, jobId);
-  if (staticResult) return staticResult;
+  if (staticResult) {
+    return {
+      success: true,
+      finalUrl: staticResult.url,
+      contentType: staticResult.mimeType,
+      contentLength: staticResult.size,
+      filename: staticResult.filename,
+      fileType: staticResult.fileType,
+      resolutionStrategy: staticResult.resolutionStrategy,
+      resolutionLog: staticResult.resolutionLog,
+    };
+  }
 
   const headlessResult = await resolveViaHeadless(hostLink.landingUrl, jobId);
-  if (headlessResult) return headlessResult;
+  if (headlessResult.resource) {
+    const r = headlessResult.resource;
+    logger.log(jobId, "RESOLVE", `strategy=headless final_url=${r.url} ct=${r.mimeType} filename=${r.filename}`);
+    return {
+      success: true,
+      finalUrl: r.url,
+      contentType: r.mimeType,
+      contentLength: r.size,
+      filename: r.filename,
+      fileType: r.fileType,
+      resolutionStrategy: r.resolutionStrategy,
+      resolutionLog: r.resolutionLog,
+    };
+  }
 
-  logger.log(jobId, "RESOLVE", `status=resolution_failed url=${hostLink.landingUrl}`);
-  return null;
+  const reason = headlessResult.reason || "no_media_found";
+  logger.log(jobId, "RESOLVE", `status=resolution_failed reason=${reason} url=${hostLink.landingUrl}`);
+  return {
+    success: false,
+    reason,
+    resolutionLog: headlessResult.resource === null ? [] : undefined,
+  };
 }
 
 function extractFilenameFromDisposition(contentDisposition: string): string | null {

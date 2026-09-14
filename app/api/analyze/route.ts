@@ -1,43 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { analyzeUrl } from "../../../crawler/index";
-import { auth } from "../../../auth";
-import { connectToDatabase } from "../../../lib/mongodb";
 import { isValidUrl } from "../../../lib/utils";
-import { logger } from "../../../lib/logger";
-import { searchProvider } from "../../../lib/search/search-provider";
 
 export async function POST(request: NextRequest) {
   try {
-    await auth();
-    await connectToDatabase();
-
     const body = await request.json();
     const { url, search } = body;
 
     if (!url && !search) {
       return NextResponse.json(
-        { error: "Either URL or search query is required" },
+        { error: "URL is required" },
         { status: 400 }
       );
     }
 
     if (search && !url) {
-      try {
-        const searchResponse = await searchProvider.search(search, 10);
-        return NextResponse.json({
+      return NextResponse.json(
+        {
           success: true,
           type: "search",
-          data: searchResponse,
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Search failed";
-        logger.log("search", "RESULT", message);
-        return NextResponse.json(
-          { success: true, type: "search", data: { query: search, results: [], totalResults: 0 } },
-          { status: 200 }
-        );
-      }
+          data: {
+            query: search,
+            results: [],
+            totalResults: 0,
+            message: "Search is coming soon. Please provide a direct URL for now.",
+          },
+        },
+        { status: 200 }
+      );
     }
 
     if (url) {
@@ -131,7 +121,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: "Either URL or search query is required" },
+      { error: "URL is required" },
       { status: 400 }
     );
   } catch (error) {

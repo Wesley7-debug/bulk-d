@@ -103,16 +103,20 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { AIPageAnalysis, PageContext, UserIntent } from "../types";
 
-// Initialize the client. It automatically picks up process.env.GEMINI_API_KEY
-const ai = new GoogleGenAI({});
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+function getAiClient(): GoogleGenAI | null {
+  if (!GEMINI_API_KEY) return null;
+  return new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+}
 
 export async function analyzePageWithAI(
   pageContext: PageContext,
   intent: UserIntent,
 ): Promise<AIPageAnalysis | null> {
-  // Gracefully exit if the API key environment variable is not present
-  if (!process.env.GEMINI_API_KEY) {
+  const ai = getAiClient();
+  if (!ai) {
     return null;
   }
 
@@ -122,7 +126,6 @@ export async function analyzePageWithAI(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
 
-    // Call the native Gemini SDK
     const response = await ai.models.generateContent(
       {
         model: GEMINI_MODEL,
@@ -143,11 +146,11 @@ export async function analyzePageWithAI(
     const content = response.text;
     if (!content) return null;
 
-    // Guaranteed to match your schema, safe to parse directly
     const parsed = JSON.parse(content) as AIPageAnalysis;
     if (!parsed.pageType || !parsed.target) return null;
     return parsed;
-  } catch {
+  } catch (e) {
+    console.error("AI analysis error:", e instanceof Error ? e.message : "unknown");
     return null;
   }
 }

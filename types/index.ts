@@ -88,8 +88,14 @@ export type DiscoveryMethod =
 
 export interface DiscoveredFile {
   url: string;
+  resourceId?: string;
   name: string;
   quality?: Quality;
+  parsedTitle?: string;
+  season?: number;
+  episode?: number;
+  extension?: string;
+  collectionScope?: "in_scope" | "out_of_scope";
   fileType: FileType;
   mimeType: string;
   size?: number;
@@ -104,6 +110,7 @@ export interface DiscoveredFile {
   isSeasonPack?: boolean;
   episodeRange?: string;
   resolvedUrl?: string;
+  resolveStatus?: "ready_to_resolve" | "resolving" | "resolved" | "resolution_failed" | "requires_login";
 }
 
 export interface CollectionResult {
@@ -177,7 +184,7 @@ export interface DownloadTaskData {
   url: string;
   fileName: string;
   quality: Quality;
-  userId: string;
+  userId?: string;
 }
 
 export interface JobProgress {
@@ -210,7 +217,19 @@ export interface CreateJobRequest {
 export interface SourceAdapter {
   name: string;
   canHandle(url: string): boolean;
+  discover(url: string): Promise<DiscoveredResource[]>;
   analyze(url: string): Promise<CollectionResult>;
+}
+
+export interface DiscoveredResource {
+  url: string;
+  name: string;
+  quality?: Quality;
+  season?: number;
+  episode?: number;
+  size?: number;
+  fileType: FileType;
+  sourcePage?: string;
 }
 
 export interface CrawlPage {
@@ -332,6 +351,25 @@ export interface MediaResource {
   fileType: FileType;
   mimeType: string;
   size?: number;
+  requestHeaders?: Record<string, string>;
   resolutionStrategy: "static" | "adapter" | "headless" | "manual";
   resolutionLog: string[];
 }
+
+export type HostLinkResolveResult =
+  | {
+      success: true;
+      finalUrl: string;
+      contentType: string;
+      contentLength?: number;
+      filename?: string;
+      fileType: FileType;
+      requestHeaders?: Record<string, string>;
+      resolutionStrategy: "static" | "adapter" | "headless" | "manual";
+      resolutionLog: string[];
+    }
+  | {
+      success: false;
+      reason: string;
+      resolutionLog?: string[];
+    };

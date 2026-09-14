@@ -1,5 +1,5 @@
 import { DiscoveredFile, ErrorState, Quality } from "../types";
-import { MAX_FILE_SIZE_MB, BLOCKED_MIME_TYPES, BLOCKED_EXTENSIONS, DRM_PATTERNS, KNOWN_FILE_HOSTS, FILE_HOST_EXTENSIONS, EMBED_DOMAINS } from "../lib/constants";
+import { MAX_FILE_SIZE_MB, BLOCKED_MIME_TYPES, BLOCKED_EXTENSIONS, DRM_PATTERNS, KNOWN_FILE_HOSTS, FILE_HOST_EXTENSIONS, EMBED_DOMAINS, RESOLVABLE_HOST_PATTERNS, AUTH_GATED_HOST_PATTERNS } from "../lib/constants";
 import { mapHttpStatusToErrorState, extractFilenameFromContentDisposition } from "../lib/utils";
 import { isEmbedUrl } from "../resolver/index";
 
@@ -11,6 +11,7 @@ interface ValidationResult {
   contentLength?: number;
   filename?: string;
   quality?: Quality;
+  resolveStatus?: "ready_to_resolve" | "resolving" | "resolved" | "requires_login";
 }
 
 class ResourceValidator {
@@ -64,6 +65,11 @@ class ResourceValidator {
       return { downloadable: true, reason: "Known file host, HEAD skipped" };
     }
 
+    const hostCheck = this.checkHostType(file.url);
+    if (hostCheck) {
+      return hostCheck;
+    }
+
     const headResult = await this.headRequest(file.url);
     if (headResult) {
       return headResult;
@@ -94,7 +100,7 @@ class ResourceValidator {
   private async headRequest(url: string): Promise<ValidationResult | null> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+        const timeout = setTimeout(() => controller.abort(), 5000);
 
       const response = await fetch(url, {
         method: "HEAD",
@@ -122,6 +128,14 @@ class ResourceValidator {
       const contentType = response.headers.get("content-type") || "";
 
       if (contentType.includes("text/html")) {
+        const isResolvable = RESOLVABLE_HOST_PATTERNS.some((host) => url.toLowerCase().includes(host));
+        if (isResolvable) {
+          return {
+            downloadable: true,
+            reason: "Host landing page — will resolve during download",
+            resolveStatus: "ready_to_resolve",
+          };
+        }
         return {
           downloadable: false,
           errorState: "NOT_DOWNLOADABLE",
@@ -213,6 +227,34 @@ class ResourceValidator {
       return isKnownHost && hasMediaExt;
     } catch {
       return false;
+    }
+  }
+
+  private checkHostType(url: string): ValidationResult | null {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+
+      if (RESOLVABLE_HOST_PATTERNS.some((host) => hostname.includes(host))) {
+        return {
+          downloadable: true,
+          reason: "Host landing page — will resolve during download",
+          resolveStatus: "ready_to_resolve",
+        };
+      }
+
+      if (AUTH_GATED_HOST_PATTERNS.some((host) => hostname.includes(host))) {
+        return {
+          downloadable: false,
+          errorState: "AUTHENTICATION_REQUIRED",
+          reason: "Requires login — manual only",
+          resolveStatus: "requires_login",
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
     }
   }
 

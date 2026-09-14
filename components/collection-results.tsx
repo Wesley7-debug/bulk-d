@@ -1,18 +1,19 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Quality,
   AnalysisResult,
   AnalysisStatus,
   AccessStatus,
+  DiscoveredFile,
 } from "../types";
 import { Button } from "./ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Checkbox } from "./ui/checkbox";
 import { formatBytes } from "../lib/utils";
+import { Download, Loader2 } from "lucide-react";
 
 function isErrorStatus(status: AnalysisStatus): boolean {
   return ["PROTECTED", "BLOCKED", "AUTH_REQUIRED", "RATE_LIMITED", "NOT_FOUND", "SERVER_ERROR"].includes(status);
@@ -44,6 +45,116 @@ function getAccessIcon(status: AccessStatus): string {
     case "TIMEOUT": return "\u23F0";
     default: return "\u2753";
   }
+}
+
+function deriveQualities(files: DiscoveredFile[]): string[] {
+  const qualitySet = new Set<string>();
+  for (const f of files) {
+    if (f.quality && f.quality.trim()) {
+      qualitySet.add(f.quality.trim());
+    }
+  }
+  return Array.from(qualitySet).sort((a, b) => {
+    const numA = parseInt(a.replace(/\D/g, "")) || 0;
+    const numB = parseInt(b.replace(/\D/g, "")) || 0;
+    return numA - numB;
+  });
+}
+
+function getDisplayName(file: DiscoveredFile, index: number): string {
+  if (file.name && file.name !== "download" && file.name.trim().length > 0) {
+    return file.name;
+  }
+  try {
+    const url = new URL(file.url);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last && last !== "download.php" && last.length > 3) {
+      return decodeURIComponent(last);
+    }
+  } catch {}
+  if (file.season && file.episode) {
+    return `Season ${file.season}, Episode ${file.episode}`;
+  }
+  return `File ${index + 1}`;
+}
+
+function getFileId(file: DiscoveredFile): string {
+  return file.resourceId || file.url;
+}
+
+function triggerBrowserDownload(url: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function proxyDownload(file: DiscoveredFile): Promise<void> {
+  const response = await fetch("/api/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      files: [{
+        id: getFileId(file),
+        url: file.url,
+        resolvedUrl: file.resolvedUrl || file.url,
+        filename: getDisplayName(file, 0),
+      }],
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Download failed" }));
+    throw new Error(error.error || `HTTP ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = getDisplayName(file, 0);
+  a.target = "_blank";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(blobUrl);
+}
+
+function deduplicateFiles(files: DiscoveredFile[]): DiscoveredFile[] {
+  const seen = new Map<string, DiscoveredFile>();
+  for (const file of files) {
+    const id = getFileId(file);
+    const existing = seen.get(id);
+    if (!existing) {
+      seen.set(id, file);
+      continue;
+    }
+    const existingScore = [
+      existing.resolvedUrl,
+      existing.name,
+      existing.quality,
+      existing.size,
+      existing.season,
+      existing.episode,
+    ].filter(Boolean).length;
+    const currentScore = [
+      file.resolvedUrl,
+      file.name,
+      file.quality,
+      file.size,
+      file.season,
+      file.episode,
+    ].filter(Boolean).length;
+    if (currentScore > existingScore) {
+      seen.set(id, file);
+    }
+  }
+  return Array.from(seen.values());
 }
 
 function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
@@ -147,57 +258,106 @@ function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
 }
 
 function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
-  const availableQualities = analysis.availableQualities;
-  const [selectedQuality, setSelectedQuality] = useState<Quality>(
-    availableQualities.length > 0 ? availableQualities[availableQualities.length - 1] : "default"
+  const dedupedFiles = useMemo(() => deduplicateFiles(analysis.files), [analysis.files]);
+  const derivedQualities = useMemo(() => deriveQualities(dedupedFiles), [dedupedFiles]);
+  const downloadableFiles = useMemo(
+    () => dedupedFiles.filter((f) => f.downloadable),
+    [dedupedFiles]
   );
-  const downloadableFiles = analysis.files.filter((f) => f.downloadable);
-  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(
-    () => new Set(downloadableFiles.map((f) => f.url))
-  );
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const router = useRouter();
 
-  const toggleFile = (url: string) => {
-    setSelectedFiles((prev) => {
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(downloadableFiles.map((f) => getFileId(f)))
+  );
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [statusMsg, setStatusMsg] = useState("");
+
+  const prevFileIdsRef = useRef<string>("");
+
+  useEffect(() => {
+    const currentIds = downloadableFiles.map((f) => getFileId(f)).sort().join(",");
+    if (prevFileIdsRef.current && prevFileIdsRef.current !== currentIds) {
+      setSelectedIds(new Set(downloadableFiles.map((f) => getFileId(f))));
+    }
+    prevFileIdsRef.current = currentIds;
+  }, [downloadableFiles]);
+
+  const toggleFile = (id: string) => {
+    setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(url)) next.delete(url);
-      else next.add(url);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
-  const selectAll = () => setSelectedFiles(new Set(downloadableFiles.map((f) => f.url)));
-  const deselectAll = () => setSelectedFiles(new Set());
+  const selectAll = () => setSelectedIds(new Set(downloadableFiles.map((f) => getFileId(f))));
+  const deselectAll = () => setSelectedIds(new Set());
 
-  const handleDownload = async () => {
-    if (selectedFiles.size === 0) return;
-    setLoading(true);
+  const handleSingleDownload = useCallback(async (file: DiscoveredFile) => {
+    const fileId = getFileId(file);
+    setDownloadingId(fileId);
     setError("");
 
     try {
-      const res = await fetch("/api/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceUrl: analysis.originalUrl,
-          collectionTitle: analysis.title || "Untitled Collection",
-          quality: selectedQuality,
-          fileUrls: Array.from(selectedFiles),
-          thumbnailUrl: analysis.thumbnail,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to create job");
-      sessionStorage.removeItem("analyzeResult");
-      router.push(`/jobs/${data.jobId}`);
+      if (file.resolvedUrl) {
+        triggerBrowserDownload(file.resolvedUrl, getDisplayName(file, dedupedFiles.indexOf(file)));
+      } else {
+        await proxyDownload(file);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start download");
+      setError(err instanceof Error ? err.message : "Download failed");
     } finally {
-      setLoading(false);
+      setTimeout(() => setDownloadingId(null), 1000);
     }
-  };
+  }, [dedupedFiles]);
+
+  const handleDownloadSelected = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+
+    const selectedFiles = downloadableFiles.filter(
+      (f) => selectedIds.has(getFileId(f))
+    );
+
+    if (selectedFiles.length === 0) return;
+
+    if (selectedFiles.length !== selectedIds.size) {
+      console.warn(`[DOWNLOAD] Selection mismatch: ${selectedIds.size} selected but only ${selectedFiles.length} found in file list`);
+    }
+
+    setError("");
+    const total = selectedFiles.length;
+    let initiated = 0;
+    let failed = 0;
+
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const file = selectedFiles[i];
+
+      setTimeout(async () => {
+        try {
+          if (file.resolvedUrl) {
+            triggerBrowserDownload(file.resolvedUrl, getDisplayName(file, dedupedFiles.indexOf(file)));
+          } else {
+            await proxyDownload(file);
+          }
+          initiated++;
+        } catch {
+          failed++;
+          setError(`Failed to initiate download for ${getDisplayName(file, dedupedFiles.indexOf(file))}`);
+        }
+      }, i * 200);
+    }
+
+    setStatusMsg(`Initiating ${total} download${total > 1 ? "s" : ""}...`);
+    setTimeout(() => {
+      if (failed > 0) {
+        setStatusMsg(`Started ${initiated} download${initiated > 1 ? "s" : ""}, ${failed} failed`);
+      } else {
+        setStatusMsg(`Started ${total} download${total > 1 ? "s" : ""}`);
+      }
+      setTimeout(() => setStatusMsg(""), 3000);
+    }, total * 200 + 500);
+  }, [selectedIds, downloadableFiles, dedupedFiles]);
 
   return (
     <div className="space-y-6">
@@ -225,7 +385,7 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
             </div>
             <div>
               <div className="text-2xl font-bold text-green-400">{analysis.statistics.downloadable}</div>
-              <div className="text-sm text-gray-400">Downloadable</div>
+              <div className="text-sm text-gray-400">Ready</div>
             </div>
             <div>
               <div className="text-2xl font-bold text-yellow-400">{analysis.statistics.inaccessible}</div>
@@ -245,34 +405,21 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
         <Card>
           <CardContent className="py-3">
             <p className="text-sm text-gray-400">
-              {analysis.statistics.inaccessible} resource(s) were discovered but could not be verified as downloadable.
-              These may be protected, require authentication, or have other access restrictions.
+              {analysis.statistics.inaccessible} resource(s) could not be verified as downloadable.
             </p>
           </CardContent>
         </Card>
       )}
 
-      {availableQualities.length > 0 && (
+      {derivedQualities.length > 1 && (
         <Card>
-          <CardHeader>
-            <CardTitle>Quality</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex gap-2">
-              {availableQualities.map((q) => (
-                <Button
-                  key={q}
-                  variant={selectedQuality === q ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSelectedQuality(q)}
-                >
-                  {q}
-                </Button>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span>Qualities:</span>
+              {derivedQualities.map((q) => (
+                <Badge key={q} variant="outline" className="text-xs">{q}</Badge>
               ))}
             </div>
-            <p className="mt-2 text-xs text-gray-500">
-              Applies to all files. Files without this quality will be marked unavailable.
-            </p>
           </CardContent>
         </Card>
       )}
@@ -280,7 +427,7 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>Files ({selectedFiles.size} / {downloadableFiles.length} selected)</CardTitle>
+            <CardTitle>Files ({selectedIds.size} / {downloadableFiles.length} selected)</CardTitle>
             <div className="flex gap-2">
               <Button variant="ghost" size="sm" onClick={selectAll}>Select All</Button>
               <Button variant="ghost" size="sm" onClick={deselectAll}>Deselect All</Button>
@@ -288,61 +435,104 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="max-h-96 space-y-2 overflow-y-auto">
-            {analysis.files.map((file) => {
+          <div className="max-h-96 space-y-1 overflow-y-auto">
+            {dedupedFiles.map((file, idx) => {
               const isSeasonPack = file.isSeasonPack;
+              const displayName = getDisplayName(file, idx);
+              const fileKey = getFileId(file);
+              const isDownloading = downloadingId === fileKey;
+              const isResolved = file.resolveStatus === "resolved" && file.resolvedUrl;
+              const isFailed = file.resolveStatus === "resolution_failed";
+              const isResolving = file.resolveStatus === "ready_to_resolve" || file.resolveStatus === "resolving";
+
               return (
                 <div
-                  key={file.url}
+                  key={fileKey}
                   className={`flex items-center gap-3 rounded-lg border p-3 ${
-                    isSeasonPack
-                      ? "border-amber-700/50 bg-amber-900/10"
-                      : file.downloadable
-                        ? "border-gray-700 hover:border-gray-600"
-                        : "border-gray-800 opacity-50"
+                    !file.downloadable
+                      ? "border-gray-800 opacity-50"
+                      : isSeasonPack
+                        ? "border-amber-700/50 bg-amber-900/10"
+                        : "border-gray-700 hover:border-gray-600"
                   }`}
                 >
-                  <Checkbox
-                    checked={selectedFiles.has(file.url)}
-                    onCheckedChange={() => toggleFile(file.url)}
-                    disabled={!file.downloadable}
-                  />
+                  {file.downloadable && (
+                    <Checkbox
+                      checked={selectedIds.has(fileKey)}
+                      onCheckedChange={() => toggleFile(fileKey)}
+                    />
+                  )}
+                  {!file.downloadable && <div className="w-4" />}
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-white truncate">
-                      {isSeasonPack && <span className="text-amber-400 mr-1">📦</span>}
-                      {file.name}
+                      {isSeasonPack && <span className="text-amber-400 mr-1">{"\u{1F4E6}"}</span>}
+                      {displayName}
                     </div>
                     <div className="text-xs text-gray-500">
                       {file.fileType} {file.size ? `\u00B7 ${formatBytes(file.size)}` : ""}
+                      {file.episode ? ` \u00B7 Episode ${file.episode}` : ""}
                       {isSeasonPack && file.episodeRange && ` \u00B7 Episodes ${file.episodeRange}`}
                       {isSeasonPack && " \u00B7 Season Pack"}
                     </div>
                   </div>
                   {file.quality && <Badge variant="outline">{file.quality}</Badge>}
                   {isSeasonPack && <Badge variant="warning">Archive</Badge>}
-                  {!file.downloadable && (
-                    <Badge variant="destructive">{file.downloadBlocked || "Not available"}</Badge>
+                  {!file.downloadable && file.downloadBlocked && (
+                    <Badge variant="destructive">{file.downloadBlocked}</Badge>
+                  )}
+                  {isResolved && (
+                    <Badge variant="success" className="text-xs">Resolved</Badge>
+                  )}
+                  {isFailed && (
+                    <Badge variant="destructive" className="text-xs">Unable to resolve</Badge>
+                  )}
+                  {isResolving && file.downloadable && (
+                    <Badge variant="outline" className="border-blue-700 text-blue-400 text-xs">
+                      <Loader2 className="h-3 w-3 animate-spin mr-1 inline" />
+                      Resolving...
+                    </Badge>
+                  )}
+                  {file.downloadable && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      disabled={isDownloading || isFailed || isResolving}
+                      onClick={() => handleSingleDownload(file)}
+                      title={`Download ${displayName}`}
+                    >
+                      {isDownloading ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+                      ) : (
+                        <Download className="h-4 w-4 text-gray-400 hover:text-white" />
+                      )}
+                    </Button>
                   )}
                 </div>
               );
             })}
           </div>
           {(() => {
-            const packs = analysis.files.filter((f) => f.isSeasonPack);
-            const individuals = analysis.files.filter((f) => !f.isSeasonPack && f.downloadable);
+            const packs = dedupedFiles.filter((f) => f.isSeasonPack);
+            const individuals = dedupedFiles.filter((f) => !f.isSeasonPack && f.downloadable);
             const hasOverlap = packs.length > 0 && individuals.length > 0;
             if (!hasOverlap) return null;
             return (
               <div className="mt-3 rounded-lg border border-yellow-800/50 bg-yellow-900/10 p-3">
                 <p className="text-xs text-yellow-300/80">
-                  Both season pack(s) and individual episodes are selected. You may be downloading duplicate content.
-                  Consider selecting only the season pack, or only individual episodes.
+                  Both season pack(s) and individual episodes are available.
                 </p>
               </div>
             );
           })()}
         </CardContent>
       </Card>
+
+      {statusMsg && (
+        <div className="rounded-lg bg-green-900/30 border border-green-800 p-3 text-sm text-green-400 flex items-center gap-2">
+          {statusMsg}
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg bg-red-900/30 border border-red-800 p-3 text-sm text-red-400">
@@ -351,12 +541,14 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
       )}
 
       <Button
-        onClick={handleDownload}
-        disabled={loading || selectedFiles.size === 0}
+        onClick={handleDownloadSelected}
+        disabled={selectedIds.size === 0}
         size="lg"
         className="w-full"
       >
-        {loading ? "Starting..." : `Download ${selectedFiles.size} Files as ZIP`}
+        {selectedIds.size === 1
+          ? "Download Selected File"
+          : `Download ${selectedIds.size} Selected Files`}
       </Button>
     </div>
   );

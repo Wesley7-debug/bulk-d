@@ -29,21 +29,16 @@ export function markUnavailableFiles(
 }
 
 export function getQualityPriority(quality: Quality): number {
-  const priorities: Record<Quality, number> = {
-    "360p": 1,
-    "480p": 2,
-    "720p": 3,
-    "1080p": 4,
-  };
-  return priorities[quality];
+  const numeric = parseInt(quality, 10);
+  if (Number.isFinite(numeric)) return numeric;
+  if (quality === "Default") return 0;
+  return -1;
 }
 
 export function detectQualityFromUrl(url: string): Quality | undefined {
   const lower = url.toLowerCase();
-  if (lower.includes("1080") || lower.includes("1080p")) return "1080p";
-  if (lower.includes("720") || lower.includes("720p")) return "720p";
-  if (lower.includes("480") || lower.includes("480p")) return "480p";
-  if (lower.includes("360") || lower.includes("360p")) return "360p";
+  const match = lower.match(/\b(\d{3,4})p\b/);
+  if (match) return `${match[1]}p`;
   return undefined;
 }
 
@@ -51,18 +46,13 @@ export function detectQualityFromMetadata(metadata: Record<string, string>): Qua
   const height = metadata["height"] || metadata["yt-dlp:height"];
   if (height) {
     const h = parseInt(height);
-    if (h >= 1080) return "1080p";
-    if (h >= 720) return "720p";
-    if (h >= 480) return "480p";
-    if (h >= 360) return "360p";
+    if (Number.isFinite(h) && h > 0) return `${h}p`;
   }
   const quality = metadata["quality"] || metadata["resolution"];
   if (quality) {
     const q = quality.toLowerCase();
-    if (q.includes("1080")) return "1080p";
-    if (q.includes("720")) return "720p";
-    if (q.includes("480")) return "480p";
-    if (q.includes("360")) return "360p";
+    const match = q.match(/\b(\d{3,4})p?\b/);
+    if (match) return `${match[1]}p`;
     if (q.includes("hd")) return "720p";
     if (q.includes("sd")) return "480p";
   }
@@ -118,7 +108,7 @@ export function selectFilesForQuality(
       selected.push(qualityMatch);
     } else {
       const bestAvailable = [...episodeFiles].sort(
-        (a, b) => getQualityPriority(b.quality || "360p") - getQualityPriority(a.quality || "360p")
+        (a, b) => getQualityPriority(b.quality || "0p") - getQualityPriority(a.quality || "0p")
       )[0];
       if (bestAvailable) {
         selected.push({

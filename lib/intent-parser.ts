@@ -84,10 +84,13 @@ function extractTitleFromUrl(url: string): string | null {
       .replace(/[-_]/g, " ")
       .replace(/\.(html?|php|aspx?|jsp)$/i, "")
       .replace(/\b(s\d+|season\d+|ep\d+|episode\d+)\b/gi, "")
+      .replace(/\bid\d+\b/gi, "")
+      .replace(/\b\d{5,}\b/g, "")
       .trim();
     if (cleaned.length < 2) return null;
     return cleaned
       .split(" ")
+      .filter((w) => w.length > 0)
       .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
   } catch {

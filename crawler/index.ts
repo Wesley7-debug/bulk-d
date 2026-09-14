@@ -1,8 +1,22 @@
 import { AnalysisResult, SearchResponse } from "../types";
 import { analyzeUrl } from "./crawler";
 import { searchProvider } from "../lib/search/search-provider";
+import { GenericPageAdapter } from "./generic-page-adapter";
+import { BaseAdapter } from "./base-adapter";
 
 export { analyzeUrl };
+export { BaseAdapter };
+export { GenericPageAdapter };
+
+const adapters: BaseAdapter[] = [new GenericPageAdapter()];
+
+export function registerAdapter(adapter: BaseAdapter): void {
+  adapters.push(adapter);
+}
+
+export function getAdapters(): readonly BaseAdapter[] {
+  return adapters;
+}
 
 export async function searchAndAnalyze(
   query: string,

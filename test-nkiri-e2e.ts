@@ -1,6 +1,6 @@
 import { resolveStatic, resolveHostLink } from "./resolver/index.js";
 import { execSync } from "child_process";
-import { statSync, readFileSync, existsSync } from "fs";
+import { existsSync } from "fs";
 
 const ffprobePath = (() => {
   try { execSync("ffprobe -version", { stdio: "ignore" }); return "ffprobe"; } catch {
@@ -65,9 +65,9 @@ async function testCase(tc: TestCase) {
       sourcePage: tc.url,
     };
     const headlessResult = await resolveHostLink(hostLink, tc.jobId);
-    if (headlessResult) {
-      console.log(`HEADLESS OK: url=${headlessResult.url.substring(0, 200)}`);
-      console.log(`  ct=${headlessResult.mimeType} size=${headlessResult.size} strategy=${headlessResult.resolutionStrategy}`);
+    if (headlessResult.success) {
+      console.log(`HEADLESS OK: url=${headlessResult.finalUrl.substring(0, 200)}`);
+      console.log(`  ct=${headlessResult.contentType} size=${headlessResult.contentLength} strategy=${headlessResult.resolutionStrategy}`);
       console.log(`  filename=${headlessResult.filename}`);
       console.log(`  log:`);
       for (const entry of headlessResult.resolutionLog) {
@@ -77,7 +77,7 @@ async function testCase(tc: TestCase) {
       // Verify the resolved URL is actually downloadable
       console.log("\n--- Step 3: Verify resolved URL via HTTP GET ---");
       try {
-        const resp = await fetch(headlessResult.url, {
+        const resp = await fetch(headlessResult.finalUrl, {
           headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
           redirect: "follow",
         });
@@ -112,11 +112,12 @@ async function testCase(tc: TestCase) {
         } else {
           console.log(`  NOT MEDIA — response is ${ct}`);
         }
-      } catch (e: any) {
-        console.log(`  HTTP error: ${e.message?.substring(0, 200)}`);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : "unknown";
+        console.log(`  HTTP error: ${message.substring(0, 200)}`);
       }
     } else {
-      console.log("HEADLESS: null (resolution failed)");
+      console.log(`HEADLESS: resolution failed (${headlessResult.reason})`);
     }
   } else {
     // Static worked — still verify the URL
@@ -147,8 +148,9 @@ async function testCase(tc: TestCase) {
         const codecMatch = ff.match(/codec_name=(\w+)/);
         console.log(`  ffprobe codec: ${codecMatch?.[1] || "N/A"} duration: ${durationMatch?.[1] || "N/A"}s`);
       }
-    } catch (e: any) {
-      console.log(`  HTTP error: ${e.message?.substring(0, 200)}`);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "unknown";
+      console.log(`  HTTP error: ${message.substring(0, 200)}`);
     }
   }
 }

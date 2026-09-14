@@ -14,6 +14,9 @@ interface FileDetail {
   failed: boolean;
   error: string | null;
   quality: string;
+  resolving?: boolean;
+  resolvedUrl?: string | null;
+  resolutionStrategy?: string | null;
 }
 
 interface JobProgress {
@@ -30,6 +33,7 @@ interface JobProgress {
   files?: FileDetail[];
   failedFileDetails?: FileDetail[];
   succeededFileDetails?: FileDetail[];
+  resolvingFileDetails?: FileDetail[];
 }
 
 const statusColors: Record<string, string> = {
@@ -200,6 +204,20 @@ export function JobProgress({ jobId }: { jobId: string }) {
             <div className="text-sm">
               <span className="text-gray-500">ZIP Size: </span>
               <span className="text-white">{formatBytes(progress.zipSize)}</span>
+            </div>
+          )}
+
+          {progress.resolvingFileDetails && progress.resolvingFileDetails.length > 0 && (
+            <div className="rounded-lg border border-blue-800/50 bg-blue-900/10 p-3 space-y-2">
+              <h4 className="text-xs font-medium text-blue-400">Resolving ({progress.resolvingFileDetails.length})</h4>
+              <div className="max-h-40 space-y-1 overflow-y-auto">
+                {progress.resolvingFileDetails.map((f, i) => (
+                  <div key={i} className="text-xs text-blue-300/80">
+                    <span className="font-medium">{f.fileName}</span>
+                    <span className="text-blue-400/60 ml-1">— resolving host link (may take 20-40s)...</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

@@ -2,14 +2,13 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Input } from "./ui/input";
 import { Button } from "./ui/button";
 
 export function AnalyzeForm() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [mode, setMode] = useState<"url" | "search">("url");
+  const [focused, setFocused] = useState(false);
   const router = useRouter();
 
   const isUrl = (value: string): boolean => {
@@ -24,26 +23,23 @@ export function AnalyzeForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) {
-      setError(mode === "url" ? "Please enter a URL" : "Please enter a search query");
+      setError("Enter a URL to get started");
+      return;
+    }
+
+    if (!isUrl(input.trim())) {
+      setError("Please enter a valid URL starting with http:// or https://");
       return;
     }
 
     setLoading(true);
     setError("");
 
-    const isInputUrl = isUrl(input.trim());
-    const actualMode = isInputUrl ? "url" : "search";
-
     try {
-      const body =
-        actualMode === "url"
-          ? { url: input.trim() }
-          : { search: input.trim() };
-
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ url: input.trim() }),
       });
 
       const data = await res.json();
@@ -52,13 +48,8 @@ export function AnalyzeForm() {
         throw new Error(data.error || "Analysis failed");
       }
 
-      if (data.type === "search" && data.data?.results) {
-        sessionStorage.setItem("searchResults", JSON.stringify(data.data));
-        router.push("/search");
-      } else {
-        sessionStorage.setItem("analyzeResult", JSON.stringify(data.data));
-        router.push("/analyze");
-      }
+      sessionStorage.setItem("analyzeResult", JSON.stringify(data.data));
+      router.push("/analyze");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -66,75 +57,103 @@ export function AnalyzeForm() {
     }
   };
 
-  const placeholders: Record<string, string> = {
-    url: "https://example.com/collection",
-    search: "Search for a series, movie, or media...",
-  };
-
   return (
     <form onSubmit={handleSubmit} className="w-full max-w-2xl space-y-4">
-      <div className="space-y-2">
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setMode("url")}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-              mode === "url"
-                ? "bg-white text-black"
-                : "text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            URL
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("search")}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-              mode === "search"
-                ? "bg-white text-black"
-                : "text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            Search
-          </button>
+      <div className="relative">
+        <div
+          className={`relative rounded-xl border transition-all duration-200 ${
+            focused
+              ? "border-gray-500/50 bg-white/[0.04] shadow-[0_0_20px_rgba(255,255,255,0.03)]"
+              : "border-gray-800/80 bg-white/[0.02]"
+          }`}
+        >
+          <div className="flex items-center gap-3 px-4 py-3">
+            <svg
+              className={`h-5 w-5 shrink-0 transition-colors ${
+                focused ? "text-gray-300" : "text-gray-600"
+              }`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+              />
+            </svg>
+            <input
+              type="text"
+              placeholder="https://example.com/tv-series/your-show-season-1"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              disabled={loading}
+              className="flex-1 bg-transparent text-sm text-white placeholder-gray-600 outline-none"
+            />
+            {input && !loading && (
+              <button
+                type="button"
+                onClick={() => setInput("")}
+                className="text-gray-600 hover:text-gray-400 transition-colors"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
-        <Input
-          placeholder={placeholders[mode]}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          disabled={loading}
-        />
-      </div>
 
-      <div className="flex items-center gap-2 text-xs text-gray-500">
-        {mode === "url" ? (
-          <span>Paste a URL to a public media collection or website</span>
-        ) : (
-          <span>Search for any media content across the web</span>
-        )}
+        <p className="mt-2 px-1 text-xs text-gray-600">
+          Paste a URL to a public media collection or season page
+        </p>
       </div>
 
       {error && (
-        <div className="rounded-lg bg-red-900/30 border border-red-800 p-3 text-sm text-red-400">
+        <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
           {error}
         </div>
       )}
 
-      <Button type="submit" disabled={loading} className="w-full" size="lg">
+      <Button
+        type="submit"
+        disabled={loading || !input.trim()}
+        className="w-full rounded-xl bg-white text-black font-medium hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
+        size="lg"
+      >
         {loading ? (
-          <span className="flex items-center gap-2">
+          <span className="flex items-center justify-center gap-2">
             <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
-            {mode === "url" ? "Analyzing..." : "Searching..."}
+            Analyzing...
           </span>
-        ) : mode === "url" ? (
-          "Analyze Collection"
         ) : (
-          "Search"
+          "Analyze"
         )}
       </Button>
+
+      <div className="text-center">
+        <span className="text-xs text-gray-700">
+          Search coming soon &mdash; use a direct URL for now
+        </span>
+      </div>
     </form>
   );
 }

@@ -1,19 +1,19 @@
 export const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/bulkforge";
-export const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+export const REDIS_URL = process.env.REDIS_URL || "";
 export const S3_ENDPOINT = process.env.S3_ENDPOINT || "";
 export const S3_BUCKET = process.env.S3_BUCKET || "bulkforge";
 export const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || "";
 export const S3_SECRET_KEY = process.env.S3_SECRET_KEY || "";
 export const S3_REGION = process.env.S3_REGION || "us-east-1";
 
-export const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT_DOWNLOADS || "5");
+export const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.DOWNLOAD_CONCURRENCY || process.env.MAX_CONCURRENT_DOWNLOADS || "4");
 export const MAX_FILE_SIZE_MB = parseInt(process.env.MAX_FILE_SIZE_MB || "2048");
 export const ZIP_EXPIRY_HOURS = parseInt(process.env.ZIP_EXPIRY_HOURS || "72");
 export const MAX_FILES_PER_JOB = parseInt(process.env.MAX_FILES_PER_JOB || "200");
 
-export const CRAWL_MAX_DEPTH = parseInt(process.env.CRAWL_MAX_DEPTH || "3");
-export const CRAWL_MAX_PAGES = parseInt(process.env.CRAWL_MAX_PAGES || "50");
-export const CRAWL_TIMEOUT_MS = parseInt(process.env.CRAWL_TIMEOUT_MS || "30000");
+export const CRAWL_MAX_DEPTH = parseInt(process.env.CRAWL_MAX_DEPTH || "2");
+export const CRAWL_MAX_PAGES = parseInt(process.env.CRAWL_MAX_PAGES || "20");
+export const CRAWL_TIMEOUT_MS = parseInt(process.env.CRAWL_TIMEOUT_MS || "15000");
 export const CRAWL_CONCURRENCY = parseInt(process.env.CRAWL_CONCURRENCY || "5");
 
 export const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY || "";
@@ -32,7 +32,6 @@ export const JOB_STATES = {
   CANCELLED: "cancelled",
 } as const;
 
-export const QUALITIES = ["360p", "480p", "720p", "1080p"] as const;
 
 export const ALLOWED_DOMAINS = process.env.ALLOWED_DOMAINS?.split(",") || [];
 
@@ -131,6 +130,23 @@ export const KNOWN_FILE_HOSTS = [
   "dl-protect.com",
 ];
 
+export const RESOLVABLE_HOST_PATTERNS = [
+  "9jarocks.net",
+  "loadedfiles.net",
+  "wideshares.org",
+  "downloadwella.com",
+  "waploaded.com",
+];
+
+export const AUTH_GATED_HOST_PATTERNS = [
+  "1fichier.com",
+  "uptobox.com",
+  "nitroflare.com",
+  "rapidgator.net",
+  "uploaded.net",
+  "filefactory.com",
+];
+
 export const FILE_HOST_EXTENSIONS = new Set([
   "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm",
   "mp3", "wav", "flac", "aac", "ogg", "m4a",
@@ -179,11 +195,11 @@ export const SITEMAP_PATHS = [
   "/robots.txt",
 ] as const;
 
-export const RESOLVE_MAX_HOPS = 4;
-export const RESOLVE_TIMEOUT_MS = 20000;
-export const HEADLESS_TIMEOUT_MS = 25000;
-export const COOLDOWN_MAX_WAIT_MS = 30000;
-export const DOWNLOAD_EVENT_TIMEOUT_MS = 30000;
+export const RESOLVE_MAX_HOPS = 3;
+export const RESOLVE_TIMEOUT_MS = 12000;
+export const HEADLESS_TIMEOUT_MS = 15000;
+export const COOLDOWN_MAX_WAIT_MS = 20000;
+export const DOWNLOAD_EVENT_TIMEOUT_MS = 20000;
 export const TITLE_MATCH_THRESHOLD = 0.55;
 export const HOST_FILE_SIZE_PATTERN = /\b\d+(?:\.\d+)?\s*(?:b|kb|mb|gb|tb)\b/i;
 export const HOST_FILENAME_PATTERN = /[\w.-]+\.(mkv|mp4|avi|mov|wmv|flv|webm|zip|rar|7z|pdf|mkv)/i;

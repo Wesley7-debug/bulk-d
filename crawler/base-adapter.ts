@@ -1,9 +1,10 @@
-import { CollectionResult, SourceAdapter } from "../types";
+import { CollectionResult, DiscoveredResource, SourceAdapter } from "../types";
 
 export abstract class BaseAdapter implements SourceAdapter {
   abstract name: string;
 
   abstract canHandle(url: string): boolean;
+  abstract discover(url: string): Promise<DiscoveredResource[]>;
   abstract analyze(url: string): Promise<CollectionResult>;
 
   protected async fetchPage(url: string): Promise<string> {

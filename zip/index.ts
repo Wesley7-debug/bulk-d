@@ -1,4 +1,4 @@
-const archiver = require("archiver");
+import { ZipArchive as Archiver } from "archiver";
 import { Readable } from "stream";
 import { getS3ObjectStream, uploadToS3 } from "../storage/index";
 
@@ -16,32 +16,32 @@ export async function createZipFromStorage(
   const storageKey = `jobs/${jobId}/zip/${jobId}.zip`;
 
   try {
-    return new Promise((resolve) => {
-      const archive = archiver("zip", {
-        zlib: { level: 6 },
-      });
+    const { PassThrough } = await import("stream");
+    const zipPassThrough = new PassThrough();
 
-      const chunks: Buffer[] = [];
+    const uploadPromise = uploadToS3(storageKey, zipPassThrough as any, "application/zip");
+
+    return new Promise((resolve) => {
+      const archive = new Archiver({ zlib: { level: 6 } });
+      let totalBytes = 0;
+
+      archive.pipe(zipPassThrough);
 
       archive.on("data", (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
-
-      archive.on("end", async () => {
-        const buffer = Buffer.concat(chunks);
-        await uploadToS3(storageKey, buffer, "application/zip");
-        resolve({
-          success: true,
-          storageKey,
-          size: buffer.length,
-        });
+        totalBytes += chunk.length;
       });
 
       archive.on("error", (err: Error) => {
-        resolve({
-          success: false,
-          error: err.message,
-        });
+        resolve({ success: false, error: err.message });
+      });
+
+      archive.on("end", async () => {
+        try {
+          await uploadPromise;
+          resolve({ success: true, storageKey, size: totalBytes });
+        } catch (err) {
+          resolve({ success: false, error: err instanceof Error ? err.message : "Upload failed" });
+        }
       });
 
       (async () => {

@@ -1,5 +1,6 @@
 import { uploadToS3 } from "../storage/index";
 import { sanitizeFileName } from "../lib/utils";
+import { PassThrough } from "stream";
 
 interface DownloadResult {
   success: boolean;
@@ -15,7 +16,7 @@ export async function downloadFile(
   fileId: string
 ): Promise<DownloadResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 600000); // 10 min timeout for large videos
+  const timeout = setTimeout(() => controller.abort(), 600000);
 
   try {
     console.log(`[DOWNLOAD] starting fetch url=${url.substring(0, 120)} fileName=${fileName}`);
@@ -34,11 +35,7 @@ export async function downloadFile(
 
     if (!response.ok) {
       console.error(`[DOWNLOAD] HTTP error status=${response.status} statusText=${response.statusText}`);
-      return {
-        success: false,
-        bytesDownloaded: 0,
-        error: `HTTP ${response.status}: ${response.statusText}`,
-      };
+      return { success: false, bytesDownloaded: 0, error: `HTTP ${response.status}: ${response.statusText}` };
     }
 
     const contentType = response.headers.get("content-type") || "application/octet-stream";
@@ -46,35 +43,36 @@ export async function downloadFile(
 
     if (contentType.includes("text/html")) {
       console.error(`[DOWNLOAD] got HTML instead of media content_type=${contentType}`);
-      return {
-        success: false,
-        bytesDownloaded: 0,
-        error: `Server returned HTML page instead of file (content-type: ${contentType})`,
-      };
+      return { success: false, bytesDownloaded: 0, error: `Server returned HTML page instead of file (content-type: ${contentType})` };
     }
 
     if (!response.body) {
-      return {
-        success: false,
-        bytesDownloaded: 0,
-        error: "No response body",
-      };
+      return { success: false, bytesDownloaded: 0, error: "No response body" };
     }
 
     const safeFileName = sanitizeFileName(fileName);
     const storageKey = `jobs/${jobId}/files/${fileId}/${safeFileName}`;
 
-    const chunks: Uint8Array[] = [];
+    const passThrough = new PassThrough();
     let totalBytes = 0;
+
+    const uploadPromise = uploadToS3(storageKey, passThrough as any, contentType);
+
     const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      totalBytes += value.length;
-    }
-    const buffer = Buffer.concat(chunks.map((c) => Buffer.from(c)));
-    await uploadToS3(storageKey, buffer, contentType);
+    const pump = async (): Promise<void> => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          passThrough.end();
+          break;
+        }
+        totalBytes += value.length;
+        passThrough.write(Buffer.from(value));
+      }
+    };
+
+    await pump();
+    await uploadPromise;
 
     console.log(`[DOWNLOAD] success fileName=${fileName} bytes=${totalBytes} content_type=${contentType}`);
 
@@ -86,11 +84,7 @@ export async function downloadFile(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Download failed";
     console.error(`[DOWNLOAD] failed fileName=${fileName} error=${message}`);
-    return {
-      success: false,
-      bytesDownloaded: 0,
-      error: message,
-    };
+    return { success: false, bytesDownloaded: 0, error: message };
   } finally {
     clearTimeout(timeout);
   }

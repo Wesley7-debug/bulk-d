@@ -1,5 +1,5 @@
 import * as cheerio from "cheerio";
-import { DiscoveredFile, FileType, Quality } from "../types";
+import { DiscoveredFile, Quality } from "../types";
 import { guessFileType, guessMimeType, extractEpisodeNumber, normalizeUrl } from "../lib/utils";
 import { MEDIA_EXTENSIONS } from "../lib/constants";
 
@@ -175,10 +175,9 @@ class ExtractorEngine {
 
   private guessQualityFromUrl(url: string): Quality | undefined {
     const lower = url.toLowerCase();
-    if (lower.includes("1080") || lower.includes("1080p")) return "1080p";
-    if (lower.includes("720") || lower.includes("720p")) return "720p";
-    if (lower.includes("480") || lower.includes("480p")) return "480p";
-    if (lower.includes("360") || lower.includes("360p")) return "360p";
+    const match = lower.match(/\b(\d{3,4})p\b/);
+    if (match) return `${match[1]}p`;
+    if (lower.includes("4k") || lower.includes("2160")) return "2160p";
     return undefined;
   }
 }

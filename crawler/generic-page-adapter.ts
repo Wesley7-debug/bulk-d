@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { BaseAdapter } from "./base-adapter";
-import { CollectionResult, DiscoveredFile, Quality, FileType } from "../types";
+import { CollectionResult, DiscoveredFile, DiscoveredResource, Quality } from "../types";
 import { discovery } from "../discovery/index";
 
 export class GenericPageAdapter extends BaseAdapter {
@@ -13,6 +13,23 @@ export class GenericPageAdapter extends BaseAdapter {
     } catch {
       return false;
     }
+  }
+
+  async discover(url: string): Promise<DiscoveredResource[]> {
+    const html = await this.fetchPage(url);
+    const $ = cheerio.load(html);
+    const discoveredFiles = await discovery.findDownloadableResources($, url);
+
+    return discoveredFiles.map((f) => ({
+      url: f.url,
+      name: f.name,
+      quality: f.quality,
+      season: f.season,
+      episode: f.episode,
+      size: f.size,
+      fileType: f.fileType,
+      sourcePage: f.sourcePage || url,
+    }));
   }
 
   async analyze(url: string): Promise<CollectionResult> {
@@ -53,10 +70,9 @@ export class GenericPageAdapter extends BaseAdapter {
         qualitySet.add(file.quality);
       }
     }
-    const allQualities: Quality[] = ["360p", "480p", "720p", "1080p"];
     if (qualitySet.size === 0) {
-      return allQualities;
+      return ["Default"];
     }
-    return allQualities.filter((q) => qualitySet.has(q));
+    return Array.from(qualitySet).sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
   }
 }

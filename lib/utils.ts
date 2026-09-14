@@ -75,6 +75,34 @@ export function normalizeUrl(url: string, baseUrl?: string): string {
   }
 }
 
+export function normalizeUrlSafe(rawUrl: string, baseUrl?: string): string | null {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+
+  const trimmed = rawUrl.trim();
+  if (trimmed === "") return null;
+
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("javascript:") || lower.startsWith("mailto:")
+    || lower.startsWith("tel:") || lower.startsWith("data:")
+    || lower.startsWith("blob:")) {
+    return null;
+  }
+
+  try {
+    const resolved = baseUrl ? new URL(trimmed, baseUrl) : new URL(trimmed);
+    const scheme = resolved.protocol.toLowerCase();
+    if (scheme !== "http:" && scheme !== "https:") return null;
+
+    resolved.hash = "";
+    let normalized = resolved.href;
+    normalized = normalized.replace(/\/+$/, "");
+    if (normalized === "") normalized = resolved.origin;
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
 export function extractRegistrableDomain(hostname: string): string {
   const parts = hostname.split(".");
   if (parts.length <= 2) return hostname;

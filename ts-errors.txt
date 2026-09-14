@@ -1,0 +1,63 @@
+﻿[96mresolver/index.ts[0m:[93m839[0m:[93m7[0m - [91merror[0m[90m TS2322: [0mType 'null' is not assignable to type 'HeadlessResolveResult'.
+
+[7m839[0m       return null;
+[7m   [0m [91m      ~~~~~~[0m
+
+[96mresolver/index.ts[0m:[93m861[0m:[93m9[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m861[0m         url: cdnUrl,
+[7m   [0m [91m        ~~~[0m
+
+[96mresolver/index.ts[0m:[93m879[0m:[93m9[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m879[0m         url: mediaUrl,
+[7m   [0m [91m        ~~~[0m
+
+[96mresolver/index.ts[0m:[93m927[0m:[93m15[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m927[0m               url: cdnUrl2,
+[7m   [0m [91m              ~~~[0m
+
+[96mresolver/index.ts[0m:[93m948[0m:[93m9[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m948[0m         url: responseMedia.url,
+[7m   [0m [91m        ~~~[0m
+
+[96mresolver/index.ts[0m:[93m973[0m:[93m11[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m973[0m           url: foundUrl,
+[7m   [0m [91m          ~~~[0m
+
+[96mresolver/index.ts[0m:[93m992[0m:[93m11[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m992[0m           url: videoUrl,
+[7m   [0m [91m          ~~~[0m
+
+[96mresolver/index.ts[0m:[93m1011[0m:[93m13[0m - [91merror[0m[90m TS2353: [0mObject literal may only specify known properties, and 'url' does not exist in type 'HeadlessResolveResult'.
+
+[7m1011[0m             url: resolved,
+[7m    [0m [91m            ~~~[0m
+
+[96mresolver/index.ts[0m:[93m1029[0m:[93m11[0m - [91merror[0m[90m TS2741: [0mProperty 'resource' is missing in type 'MediaResource' but required in type 'HeadlessResolveResult'.
+
+[7m1029[0m           return popupResult;
+[7m    [0m [91m          ~~~~~~[0m
+
+  [96mresolver/index.ts[0m:[93m49[0m:[93m3[0m
+    [7m49[0m   resource: MediaResource | null;
+    [7m  [0m [96m  ~~~~~~~~[0m
+    'resource' is declared here.
+
+[96mresolver/index.ts[0m:[93m1039[0m:[93m5[0m - [91merror[0m[90m TS2322: [0mType 'null' is not assignable to type 'HeadlessResolveResult'.
+
+[7m1039[0m     return null;
+[7m    [0m [91m    ~~~~~~[0m
+
+[96mresolver/index.ts[0m:[93m1044[0m:[93m5[0m - [91merror[0m[90m TS2322: [0mType 'null' is not assignable to type 'HeadlessResolveResult'.
+
+[7m1044[0m     return null;
+[7m    [0m [91m    ~~~~~~[0m
+
+
+Found 11 errors in the same file, starting at: resolver/index.ts[90m:839[0m
+

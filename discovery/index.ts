@@ -15,6 +15,7 @@ class DiscoveryEngine {
     candidates.push(...this.extractDownloadAttributes($, baseUrl));
     candidates.push(...this.extractMediaElements($, baseUrl));
     candidates.push(...this.extractMediaLinks($, baseUrl));
+    candidates.push(...this.extractDownloadButtonLinks($, baseUrl));
     candidates.push(...this.extractAnchorLinks($, baseUrl));
     candidates.push(...this.extractIframeSources($, baseUrl));
     candidates.push(...this.extractSourceElements($, baseUrl));
@@ -219,6 +220,46 @@ class DiscoveryEngine {
     return files;
   }
 
+  private extractDownloadButtonLinks($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
+    const files: DiscoveredFile[] = [];
+    const downloadTextPattern = /\bdownload\b/i;
+    const mediaHintPattern = /\b(mp4|mkv|avi|mov|wmv|flv|webm|mp3|wav|zip|rar)\b/i;
+    const dlPathPattern = /\/dl\/|\/download\/|\/files?\//i;
+
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      const linkText = $(el).attr("title") || $(el).text().trim() || "";
+      const ariaLabel = $(el).attr("aria-label") || "";
+      const fullContext = `${linkText} ${ariaLabel}`;
+
+      const isDownloadButton = downloadTextPattern.test(fullContext);
+      const hasMediaHint = mediaHintPattern.test(href + " " + fullContext);
+      const hasDlPath = dlPathPattern.test(href);
+
+      if (isDownloadButton && (hasMediaHint || hasDlPath)) {
+        const resolved = this.resolveUrl(href, baseUrl);
+        if (resolved) {
+          const type = guessFileType(resolved);
+          const name = this.extractNameFromUrl(resolved);
+          const entry: DiscoveredFile = {
+            url: resolved,
+            name,
+            fileType: type,
+            mimeType: guessMimeType(resolved),
+            downloadable: false,
+            discoveryMethod: "download-button",
+          };
+          const quality = this.guessQualityFromText(fullContext) || this.guessQualityFromUrl(resolved);
+          if (quality) entry.quality = quality;
+          files.push(entry);
+        }
+      }
+    });
+
+    return files;
+  }
+
   private extractAnchorLinks($: cheerio.CheerioAPI, baseUrl: string): DiscoveredFile[] {
     const files: DiscoveredFile[] = [];
 
@@ -354,19 +395,17 @@ class DiscoveryEngine {
 
   private guessQualityFromUrl(url: string): Quality | undefined {
     const lower = url.toLowerCase();
-    if (lower.includes("1080") || lower.includes("1080p")) return "1080p";
-    if (lower.includes("720") || lower.includes("720p")) return "720p";
-    if (lower.includes("480") || lower.includes("480p")) return "480p";
-    if (lower.includes("360") || lower.includes("360p")) return "360p";
+    const match = lower.match(/\b(\d{3,4})p\b/);
+    if (match) return `${match[1]}p`;
+    if (lower.includes("4k") || lower.includes("2160")) return "2160p";
     return undefined;
   }
 
   private guessQualityFromText(text: string): Quality | undefined {
     const lower = text.toLowerCase();
-    if (lower.includes("1080p") || lower.includes("1080")) return "1080p";
-    if (lower.includes("720p") || lower.includes("720")) return "720p";
-    if (lower.includes("480p") || lower.includes("480")) return "480p";
-    if (lower.includes("360p") || lower.includes("360")) return "360p";
+    const match = lower.match(/\b(\d{3,4})p\b/);
+    if (match) return `${match[1]}p`;
+    if (lower.includes("4k") || lower.includes("2160")) return "2160p";
     if (lower.includes("hd")) return "720p";
     if (lower.includes("sd")) return "480p";
     return undefined;

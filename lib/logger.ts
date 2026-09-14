@@ -29,6 +29,7 @@ export interface LogEntry {
 
 class Logger {
   private logs: Map<string, LogEntry[]> = new Map();
+  private enabled: boolean = process.env.LOG_VERBOSE === "true";
 
   private timestamp(): string {
     const now = new Date();
@@ -51,8 +52,10 @@ class Logger {
     jobLogs.push(entry);
     this.logs.set(jobId, jobLogs);
 
-    const dataStr = data ? ` ${JSON.stringify(data)}` : "";
-    console.log(`[${entry.timestamp}] [${jobId}] ${stage} ${message}${dataStr}`);
+    if (this.enabled) {
+      const dataStr = data ? ` ${JSON.stringify(data)}` : "";
+      console.log(`[${entry.timestamp}] [${jobId}] ${stage} ${message}${dataStr}`);
+    }
   }
 
   getLogs(jobId: string): LogEntry[] {

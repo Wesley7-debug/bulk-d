@@ -88,9 +88,8 @@ class CollectionDetector {
     for (const file of resources) {
       if (file.quality) qualitySet.add(file.quality);
     }
-    const allQualities: Quality[] = ["360p", "480p", "720p", "1080p"];
-    if (qualitySet.size === 0) return allQualities;
-    return allQualities.filter((q) => qualitySet.has(q));
+    if (qualitySet.size === 0) return ["Default"];
+    return Array.from(qualitySet).sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
   }
 
   private findBestThumbnail(
