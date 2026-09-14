@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "./ui/button";
 
@@ -11,6 +11,7 @@ export function AnalyzeForm() {
   const [focused, setFocused] = useState(false);
   const [progress, setProgress] = useState("");
   const router = useRouter();
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isUrl = (value: string): boolean => {
     try {
@@ -18,6 +19,38 @@ export function AnalyzeForm() {
       return ["http:", "https:"].includes(url.protocol);
     } catch {
       return false;
+    }
+  };
+
+  const pollCrawlStatus = async (jobId: string) => {
+    try {
+      const res = await fetch(`/api/crawl/${jobId}`);
+      if (!res.ok) return;
+
+      const data = await res.json();
+
+      if (data.status === "ready") {
+        setProgress("Crawl complete! Navigating to analysis...");
+        router.push(`/analyze?jobId=${jobId}`);
+        return;
+      }
+
+      if (data.status === "failed") {
+        setError(data.result?.message || "Crawl failed. Please try a different URL.");
+        setLoading(false);
+        setProgress("");
+        return;
+      }
+
+      const events = data.events || [];
+      const lastEvent = events[events.length - 1];
+      if (lastEvent?.message) {
+        setProgress(lastEvent.message);
+      }
+
+      pollRef.current = setTimeout(() => pollCrawlStatus(jobId), 1000);
+    } catch {
+      pollRef.current = setTimeout(() => pollCrawlStatus(jobId), 2000);
     }
   };
 
@@ -37,54 +70,23 @@ export function AnalyzeForm() {
     setError("");
     setProgress("Connecting to site...");
 
-    const progressTimer = setTimeout(() => {
-      setProgress("Crawling pages...");
-    }, 5000);
-
-    const progressTimer2 = setTimeout(() => {
-      setProgress("Resolving download links...");
-    }, 15000);
-
-    const timeoutTimer = setTimeout(() => {
-      setLoading(false);
-      setError("Analysis timed out after 45s. The site may be slow or unreachable. Try a different URL.");
-      setProgress("");
-    }, 45000);
-
     try {
-      const controller = new AbortController();
-      const fetchTimer = setTimeout(() => controller.abort(), 45000);
-
-      const res = await fetch("/api/analyze", {
+      const res = await fetch("/api/crawl", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: input.trim() }),
-        signal: controller.signal,
       });
-
-      clearTimeout(fetchTimer);
-      clearTimeout(progressTimer);
-      clearTimeout(progressTimer2);
-      clearTimeout(timeoutTimer);
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Analysis failed");
+        throw new Error(data.error || "Failed to start crawl");
       }
 
-      sessionStorage.setItem("analyzeResult", JSON.stringify(data.data));
-      router.push("/analyze");
+      setProgress("Crawling pages...");
+      pollCrawlStatus(data.jobId);
     } catch (err) {
-      clearTimeout(progressTimer);
-      clearTimeout(progressTimer2);
-      clearTimeout(timeoutTimer);
-
-      if (err instanceof DOMException && err.name === "AbortError") {
-        setError("Request timed out. The site may be slow or unreachable.");
-      } else {
-        setError(err instanceof Error ? err.message : "Something went wrong");
-      }
+      setError(err instanceof Error ? err.message : "Something went wrong");
       setProgress("");
     } finally {
       setLoading(false);
@@ -183,7 +185,7 @@ export function AnalyzeForm() {
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
               />
             </svg>
-            Analyzing...
+            Crawling...
           </span>
         ) : (
           "Analyze"

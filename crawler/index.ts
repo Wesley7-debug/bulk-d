@@ -28,3 +28,9 @@ export async function searchAndAnalyze(
 export async function analyzeSearchResult(url: string): Promise<AnalysisResult> {
   return analyzeUrl(url);
 }
+
+export async function crawlOnly(url: string, jobId?: string): Promise<AnalysisResult> {
+  const { TargetedCrawler } = await import("./crawler");
+  const crawler = new TargetedCrawler(url, jobId, true);
+  return crawler.analyze(url);
+}

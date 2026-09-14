@@ -59,7 +59,7 @@ interface EpisodeCollectionBoundary {
   candidateLinks: Array<{ href: string; text: string }>;
 }
 
-class TargetedCrawler {
+export class TargetedCrawler {
   private jobId: string;
   private visited = new Set<string>();
   private failed = new Set<string>();
@@ -74,13 +74,15 @@ class TargetedCrawler {
   private discoveryQueue: CrawlCandidate[] = [];
   private maxDepth: number;
   private maxPages: number;
+  private crawlOnly: boolean;
 
-  constructor(inputUrl: string, jobId?: string) {
+  constructor(inputUrl: string, jobId?: string, crawlOnly?: boolean) {
     this.jobId = jobId || generateJobId();
     this.startTime = Date.now();
     this.intent = parseUserIntent(inputUrl);
     this.maxDepth = CRAWL_MAX_DEPTH;
     this.maxPages = CRAWL_MAX_PAGES;
+    this.crawlOnly = crawlOnly || false;
   }
 
   private log(
@@ -187,28 +189,33 @@ class TargetedCrawler {
             }
 
             const allFiles = this.deduplicateResources(validated);
-            const toResolve = allFiles.filter((f) => f.downloadable && !f.resolvedUrl);
-            const resolveResults = await this.resolveAllInParallel(toResolve, 5);
 
-            let resolved = 0;
-            let resolveFailed = 0;
-            for (let i = 0; i < toResolve.length; i++) {
-              const resource = toResolve[i];
-              const result = resolveResults[i];
-              if (result.status === "fulfilled" && result.value) {
-                resource.resolvedUrl = result.value.url;
-                resource.name = result.value.filename || resource.name;
-                resource.size = result.value.size || resource.size;
-                if (result.value.mimeType) resource.mimeType = result.value.mimeType;
-                resource.resolveStatus = "resolved";
-                resolved++;
-              } else {
-                resource.resolveStatus = "resolution_failed";
-                resolveFailed++;
+            if (!this.crawlOnly) {
+              const toResolve = allFiles.filter((f) => f.downloadable && !f.resolvedUrl);
+              const resolveResults = await this.resolveAllInParallel(toResolve, 5);
+
+              let resolved = 0;
+              let resolveFailed = 0;
+              for (let i = 0; i < toResolve.length; i++) {
+                const resource = toResolve[i];
+                const result = resolveResults[i];
+                if (result.status === "fulfilled" && result.value) {
+                  resource.resolvedUrl = result.value.url;
+                  resource.name = result.value.filename || resource.name;
+                  resource.size = result.value.size || resource.size;
+                  if (result.value.mimeType) resource.mimeType = result.value.mimeType;
+                  resource.resolveStatus = "resolved";
+                  resolved++;
+                } else {
+                  resource.resolveStatus = "resolution_failed";
+                  resolveFailed++;
+                }
               }
-            }
 
-            this.log("RESOLVE_DONE", `resolved=${resolved} failed=${resolveFailed} total=${toResolve.length}`);
+              this.log("RESOLVE_DONE", `resolved=${resolved} failed=${resolveFailed} total=${toResolve.length}`);
+            } else {
+              this.log("CRAWL_ONLY", `skipping resolution for ${allFiles.length} files`);
+            }
 
             const downloadable = allFiles.filter((f) => f.downloadable);
             const inaccessible = allFiles.filter((f) => !f.downloadable);
@@ -503,30 +510,34 @@ class TargetedCrawler {
     validatedResources.push(...newResources);
     const allFiles = this.deduplicateResources(validatedResources);
 
-    this.log("RESOLVE_START", `resources_to_resolve=${allFiles.length}`);
+    this.log("RESOLVE_START", `resources_to_resolve=${allFiles.length} crawl_only=${this.crawlOnly}`);
 
-    const resolveConcurrency = 5;
-    const toResolve = allFiles.filter((f) => f.downloadable && !f.resolvedUrl);
-    const resolveResults = await this.resolveAllInParallel(toResolve, resolveConcurrency);
-    let resolved = 0;
-    let resolveFailed = 0;
-    for (let i = 0; i < toResolve.length; i++) {
-      const resource = toResolve[i];
-      const result = resolveResults[i];
-      if (result.status === "fulfilled" && result.value) {
-        resource.resolvedUrl = result.value.url;
-        resource.name = result.value.filename || resource.name;
-        resource.size = result.value.size || resource.size;
-        if (result.value.mimeType) resource.mimeType = result.value.mimeType;
-        resource.resolveStatus = "resolved";
-        resolved++;
-      } else {
-        resource.resolveStatus = "resolution_failed";
-        resolveFailed++;
+    if (!this.crawlOnly) {
+      const resolveConcurrency = 5;
+      const toResolve = allFiles.filter((f) => f.downloadable && !f.resolvedUrl);
+      const resolveResults = await this.resolveAllInParallel(toResolve, resolveConcurrency);
+      let resolved = 0;
+      let resolveFailed = 0;
+      for (let i = 0; i < toResolve.length; i++) {
+        const resource = toResolve[i];
+        const result = resolveResults[i];
+        if (result.status === "fulfilled" && result.value) {
+          resource.resolvedUrl = result.value.url;
+          resource.name = result.value.filename || resource.name;
+          resource.size = result.value.size || resource.size;
+          if (result.value.mimeType) resource.mimeType = result.value.mimeType;
+          resource.resolveStatus = "resolved";
+          resolved++;
+        } else {
+          resource.resolveStatus = "resolution_failed";
+          resolveFailed++;
+        }
       }
-    }
 
-    this.log("RESOLVE_DONE", `resolved=${resolved} failed=${resolveFailed} total=${toResolve.length}`);
+      this.log("RESOLVE_DONE", `resolved=${resolved} failed=${resolveFailed} total=${toResolve.length}`);
+    } else {
+      this.log("CRAWL_ONLY", `skipping resolution for ${allFiles.length} files`);
+    }
 
     const downloadable = allFiles.filter((f) => f.downloadable);
     const inaccessible = allFiles.filter((f) => !f.downloadable);

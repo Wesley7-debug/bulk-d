@@ -7,6 +7,7 @@ import {
   AnalysisStatus,
   AccessStatus,
   DiscoveredFile,
+  ResolutionEvent,
 } from "../types";
 import { Button } from "./ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "./ui/card";
@@ -157,6 +158,13 @@ function deduplicateFiles(files: DiscoveredFile[]): DiscoveredFile[] {
   return Array.from(seen.values());
 }
 
+interface EpisodeState {
+  status: "queued" | "resolving" | "resolved" | "failed";
+  downloadUrl?: string;
+  filename?: string;
+  error?: string;
+}
+
 function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
   const router = useRouter();
 
@@ -257,7 +265,7 @@ function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
   );
 }
 
-function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
+function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jobId: string | null }) {
   const dedupedFiles = useMemo(() => deduplicateFiles(analysis.files), [analysis.files]);
   const derivedQualities = useMemo(() => deriveQualities(dedupedFiles), [dedupedFiles]);
   const downloadableFiles = useMemo(
@@ -272,7 +280,106 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
   const [error, setError] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
 
-  const prevFileIdsRef = useRef<string>("");
+  const [episodeMap, setEpisodeMap] = useState<Map<string, EpisodeState>>(() => {
+    const m = new Map<string, EpisodeState>();
+    for (const f of downloadableFiles) {
+      const id = getFileId(f);
+      m.set(id, {
+        status: f.resolvedUrl ? "resolved" : "queued",
+        downloadUrl: f.resolvedUrl,
+      });
+    }
+    return m;
+  });
+  const [resolutionStarted, setResolutionStarted] = useState(false);
+  const [resolutionComplete, setResolutionComplete] = useState(false);
+  const [resolutionSummary, setResolutionSummary] = useState<{ resolved: number; failed: number; total: number } | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const resolutionInitiated = useRef(false);
+
+  const startResolution = useCallback(async () => {
+    if (!jobId || resolutionStarted) return;
+    setResolutionStarted(true);
+
+    try {
+      await fetch(`/api/resolve/${jobId}`, { method: "POST" });
+    } catch {
+      setError("Failed to start resolution");
+      return;
+    }
+
+    const es = new EventSource(`/api/resolve/${jobId}/events`);
+    eventSourceRef.current = es;
+
+    es.onmessage = (msg) => {
+      try {
+        const event = JSON.parse(msg.data) as ResolutionEvent;
+
+        if (event.type === "episode_resolved" && event.episodeId) {
+          setEpisodeMap((prev) => {
+            const next = new Map(prev);
+            const existing = next.get(event.episodeId!);
+            if (existing) {
+              next.set(event.episodeId!, {
+                ...existing,
+                status: "resolved",
+                downloadUrl: event.downloadUrl,
+                filename: event.filename,
+              });
+            }
+            return next;
+          });
+        } else if (event.type === "episode_failed" && event.episodeId) {
+          setEpisodeMap((prev) => {
+            const next = new Map(prev);
+            const existing = next.get(event.episodeId!);
+            if (existing) {
+              next.set(event.episodeId!, {
+                ...existing,
+                status: "failed",
+                error: event.reason,
+              });
+            }
+            return next;
+          });
+        } else if (event.type === "episode_resolving" && event.episodeId) {
+          setEpisodeMap((prev) => {
+            const next = new Map(prev);
+            const existing = next.get(event.episodeId!);
+            if (existing) {
+              next.set(event.episodeId!, {
+                ...existing,
+                status: "resolving",
+              });
+            }
+            return next;
+          });
+        } else if (event.type === "resolution_complete") {
+          setResolutionComplete(true);
+          setResolutionSummary({
+            resolved: event.resolved || 0,
+            failed: event.failed || 0,
+            total: event.total || 0,
+          });
+          es.close();
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.onerror = () => {
+      es.close();
+    };
+  }, [jobId, resolutionStarted]);
+
+  useEffect(() => {
+    if (jobId && downloadableFiles.length > 0 && !resolutionInitiated.current) {
+      resolutionInitiated.current = true;
+      startResolution();
+    }
+    return () => {
+      eventSourceRef.current?.close();
+    };
+  }, [jobId, downloadableFiles.length, startResolution]);
 
   useEffect(() => {
     const currentIds = downloadableFiles.map((f) => getFileId(f)).sort().join(",");
@@ -281,6 +388,8 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
     }
     prevFileIdsRef.current = currentIds;
   }, [downloadableFiles]);
+
+  const prevFileIdsRef = useRef<string>("");
 
   const toggleFile = (id: string) => {
     setSelectedIds((prev) => {
@@ -296,12 +405,14 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
 
   const handleSingleDownload = useCallback(async (file: DiscoveredFile) => {
     const fileId = getFileId(file);
+    const ep = episodeMap.get(fileId);
     setDownloadingId(fileId);
     setError("");
 
     try {
-      if (file.resolvedUrl) {
-        triggerBrowserDownload(file.resolvedUrl, getDisplayName(file, dedupedFiles.indexOf(file)));
+      const url = ep?.downloadUrl || file.resolvedUrl;
+      if (url) {
+        triggerBrowserDownload(url, ep?.filename || getDisplayName(file, 0));
       } else {
         await proxyDownload(file);
       }
@@ -310,54 +421,44 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
     } finally {
       setTimeout(() => setDownloadingId(null), 1000);
     }
-  }, [dedupedFiles]);
+  }, [episodeMap]);
 
-  const handleDownloadSelected = useCallback(async () => {
-    if (selectedIds.size === 0) return;
-
-    const selectedFiles = downloadableFiles.filter(
-      (f) => selectedIds.has(getFileId(f))
-    );
-
-    if (selectedFiles.length === 0) return;
-
-    if (selectedFiles.length !== selectedIds.size) {
-      console.warn(`[DOWNLOAD] Selection mismatch: ${selectedIds.size} selected but only ${selectedFiles.length} found in file list`);
-    }
+  const handleDownloadAll = useCallback(async () => {
+    if (downloadableFiles.length === 0) return;
 
     setError("");
-    const total = selectedFiles.length;
-    let initiated = 0;
-    let failed = 0;
+    setStatusMsg("");
+    setDownloadingId("all");
 
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const file = selectedFiles[i];
-
-      setTimeout(async () => {
-        try {
-          if (file.resolvedUrl) {
-            triggerBrowserDownload(file.resolvedUrl, getDisplayName(file, dedupedFiles.indexOf(file)));
-          } else {
-            await proxyDownload(file);
-          }
-          initiated++;
-        } catch {
-          failed++;
-          setError(`Failed to initiate download for ${getDisplayName(file, dedupedFiles.indexOf(file))}`);
+    for (let i = 0; i < downloadableFiles.length; i++) {
+      const file = downloadableFiles[i];
+      const fileId = getFileId(file);
+      const ep = episodeMap.get(fileId);
+      setDownloadingId(fileId);
+      try {
+        const url = ep?.downloadUrl || file.resolvedUrl;
+        if (url) {
+          triggerBrowserDownload(url, ep?.filename || getDisplayName(file, i));
+        } else {
+          await proxyDownload(file);
         }
-      }, i * 200);
+      } catch {
+        // skip failed files silently
+      }
+      if (i < downloadableFiles.length - 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
     }
 
-    setStatusMsg(`Initiating ${total} download${total > 1 ? "s" : ""}...`);
-    setTimeout(() => {
-      if (failed > 0) {
-        setStatusMsg(`Started ${initiated} download${initiated > 1 ? "s" : ""}, ${failed} failed`);
-      } else {
-        setStatusMsg(`Started ${total} download${total > 1 ? "s" : ""}`);
-      }
-      setTimeout(() => setStatusMsg(""), 3000);
-    }, total * 200 + 500);
-  }, [selectedIds, downloadableFiles, dedupedFiles]);
+    setDownloadingId(null);
+    setStatusMsg(`All ${downloadableFiles.length} file(s) download started`);
+    setTimeout(() => setStatusMsg(""), 4000);
+  }, [downloadableFiles, episodeMap]);
+
+  const resolvedCount = Array.from(episodeMap.values()).filter((e) => e.status === "resolved").length;
+  const failedCount = Array.from(episodeMap.values()).filter((e) => e.status === "failed").length;
+  const resolvingCount = Array.from(episodeMap.values()).filter((e) => e.status === "resolving").length;
+  const queuedCount = Array.from(episodeMap.values()).filter((e) => e.status === "queued").length;
 
   return (
     <div className="space-y-6">
@@ -400,6 +501,41 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
           </div>
         </CardContent>
       </Card>
+
+      {!resolutionComplete && resolutionStarted && (
+        <Card>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+              <div className="flex-1">
+                <div className="text-sm text-gray-300">
+                  Resolving download links...
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  {resolvedCount + failedCount} / {episodeMap.size} resolved
+                  {failedCount > 0 && ` (${failedCount} failed)`}
+                </div>
+              </div>
+              <div className="text-xs text-gray-500">
+                {resolvedCount + failedCount}/{episodeMap.size}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {resolutionComplete && resolutionSummary && (
+        <Card>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-green-400">{"\u2713"} Resolution complete</span>
+              <span className="text-gray-400">
+                {resolutionSummary.resolved} resolved, {resolutionSummary.failed} failed
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {analysis.statistics.inaccessible > 0 && (
         <Card>
@@ -467,9 +603,11 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
               const displayName = getDisplayName(file, idx);
               const fileKey = getFileId(file);
               const isDownloading = downloadingId === fileKey;
-              const isResolved = file.resolveStatus === "resolved" && file.resolvedUrl;
-              const isFailed = file.resolveStatus === "resolution_failed";
-              const isResolving = file.resolveStatus === "ready_to_resolve" || file.resolveStatus === "resolving";
+              const ep = episodeMap.get(fileKey);
+              const isResolved = ep?.status === "resolved";
+              const isFailed = ep?.status === "failed";
+              const isResolving = ep?.status === "resolving";
+              const resolvedUrl = ep?.downloadUrl || file.resolvedUrl;
 
               return (
                 <div
@@ -507,10 +645,10 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
                     <Badge variant="destructive">{file.downloadBlocked}</Badge>
                   )}
                   {isResolved && (
-                    <Badge variant="success" className="text-xs">Resolved</Badge>
+                    <Badge variant="success" className="text-xs">{"\u2713"} Resolved</Badge>
                   )}
                   {isFailed && (
-                    <Badge variant="destructive" className="text-xs">Unable to resolve</Badge>
+                    <Badge variant="destructive" className="text-xs">Failed</Badge>
                   )}
                   {isResolving && file.downloadable && (
                     <Badge variant="outline" className="border-blue-700 text-blue-400 text-xs">
@@ -518,12 +656,15 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
                       Resolving...
                     </Badge>
                   )}
+                  {!isResolved && !isFailed && !isResolving && file.downloadable && queuedCount > 0 && (
+                    <Badge variant="outline" className="text-xs text-gray-500">Queued</Badge>
+                  )}
                   {file.downloadable && (
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8 shrink-0"
-                      disabled={isDownloading || isFailed || isResolving}
+                      disabled={isDownloading || isFailed || isResolving || (!resolvedUrl && !file.resolvedUrl)}
                       onClick={() => handleSingleDownload(file)}
                       title={`Download ${displayName}`}
                     >
@@ -567,14 +708,19 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
       )}
 
       <Button
-        onClick={handleDownloadSelected}
-        disabled={selectedIds.size === 0}
+        onClick={handleDownloadAll}
+        disabled={downloadableFiles.length === 0 || downloadingId === "all"}
         size="lg"
-        className="w-full"
+        className="w-full rounded-xl bg-white text-black font-medium hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
       >
-        {selectedIds.size === 1
-          ? "Download Selected File"
-          : `Download ${selectedIds.size} Selected Files`}
+        {downloadingId === "all" ? (
+          <span className="flex items-center justify-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Downloading...
+          </span>
+        ) : (
+          `Download ${downloadableFiles.length} File${downloadableFiles.length !== 1 ? "s" : ""}`
+        )}
       </Button>
     </div>
   );
@@ -591,20 +737,74 @@ function getInitialAnalysis(): AnalysisResult | null {
   }
 }
 
-export function CollectionResults() {
-  const [analysis] = useState<AnalysisResult | null>(getInitialAnalysis);
+export function CollectionResults({ jobId }: { jobId?: string | null }) {
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(() => {
+    if (jobId) return null;
+    return getInitialAnalysis();
+  });
+  const [loading, setLoading] = useState(() => !jobId && !getInitialAnalysis());
+  const [error, setError] = useState("");
   const router = useRouter();
+  const fetchedRef = useRef(false);
 
   useEffect(() => {
-    if (!analysis) {
+    if (!jobId || fetchedRef.current) return;
+    fetchedRef.current = true;
+    setLoading(true);
+    fetch(`/api/crawl/${jobId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.result) {
+          setAnalysis(data.result);
+          sessionStorage.setItem("analyzeResult", JSON.stringify(data.result));
+        } else if (data.status === "failed") {
+          setError(data.result?.message || "Crawl failed");
+        } else if (data.status === "crawling" || data.status === "queued") {
+          setError("Crawl still in progress. Please wait...");
+        } else {
+          setError("Crawl result not available yet");
+        }
+      })
+      .catch(() => setError("Failed to load crawl results"))
+      .finally(() => setLoading(false));
+  }, [jobId]);
+
+  useEffect(() => {
+    if (!jobId && !analysis) {
       router.push("/");
     }
-  }, [analysis, router]);
+  }, [jobId, analysis, router]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="flex items-center gap-3 text-gray-500">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          Loading crawl results...
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-red-400">{error}</p>
+          </CardContent>
+        </Card>
+        <Button onClick={() => router.push("/")} variant="outline" className="w-full" size="lg">
+          Try Another URL
+        </Button>
+      </div>
+    );
+  }
 
   if (!analysis) {
     return (
       <div className="flex items-center justify-center py-20">
-        <div className="text-gray-500">Loading analysis results...</div>
+        <div className="text-gray-500">No analysis results found.</div>
       </div>
     );
   }
@@ -613,5 +813,5 @@ export function CollectionResults() {
     return <ErrorStateDisplay analysis={analysis} />;
   }
 
-  return <SuccessStateDisplay analysis={analysis} />;
+  return <SuccessStateDisplay analysis={analysis} jobId={jobId || null} />;
 }

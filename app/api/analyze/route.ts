@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { analyzeUrl } from "../../../crawler/index";
 import { isValidUrl } from "../../../lib/utils";
 import { parseUserIntent } from "../../../lib/intent-parser";
+import { AnalysisResult } from "../../../types";
 
 interface FallbackSite {
   name: string;
@@ -18,10 +19,11 @@ const FALLBACK_SITES: FallbackSite[] = [
     },
   },
   {
-    name: "NaijaVault",
+    name: "FzMovies",
     buildUrl: (title, season) => {
-      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      return `https://www.naijavault.com/${slug}-season-${season}-complete/`;
+      const slug = title.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+      const sNum = season.replace(/^0/, "");
+      return `https://fzmovies.video/search.php?searchterm=${encodeURIComponent(title)}+season+${sNum}`;
     },
   },
   {
@@ -31,17 +33,9 @@ const FALLBACK_SITES: FallbackSite[] = [
       return `https://9jarocks.net/videodownload/${slug}-season-${season}-complete.html`;
     },
   },
-  {
-    name: "Waploaded",
-    buildUrl: (title, season) => {
-      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const sNum = season.replace(/^0/, "");
-      return `https://shows.waploaded.com/series/${slug}-season-${sNum}`;
-    },
-  },
 ];
 
-function extractFallbackInfo(url: string, resultTitle: string | null) {
+function extractShowInfo(url: string, resultTitle: string | null) {
   const intent = parseUserIntent(url);
   const title = resultTitle
     ? resultTitle.replace(/\s*\(complete\).*/i, "").trim()
@@ -56,216 +50,125 @@ function extractFallbackInfo(url: string, resultTitle: string | null) {
   return { title: cleanTitle, season };
 }
 
+function hasResults(r: AnalysisResult): boolean {
+  return r.status === "MEDIA_FOUND" && r.files.some((f) => f.downloadable);
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { url, search } = body;
+    const { url } = body;
 
-    if (!url && !search) {
-      return NextResponse.json(
-        { error: "URL is required" },
-        { status: 400 }
-      );
+    if (!url) {
+      return NextResponse.json({ error: "URL is required" }, { status: 400 });
     }
 
-    if (search && !url) {
-      return NextResponse.json(
-        {
-          success: true,
-          type: "search",
-          data: {
-            query: search,
-            results: [],
-            totalResults: 0,
-            message: "Search is coming soon. Please provide a direct URL for now.",
-          },
-        },
-        { status: 200 }
-      );
+    if (!isValidUrl(url)) {
+      return NextResponse.json({
+        success: true,
+        type: "analysis",
+        data: buildErrorResult(url, "Invalid URL format. Please provide a valid http or https URL."),
+      });
     }
 
-    if (url) {
-      if (!isValidUrl(url)) {
-        return NextResponse.json(
-          {
-            success: true,
-            type: "analysis",
-            data: {
-              jobId: "invalid",
-              status: "BLOCKED",
-              accessStatus: "UNKNOWN",
-              domain: "",
-              originalUrl: url,
-              finalUrl: "",
-              title: null,
-              description: null,
-              thumbnail: null,
-              crawl: { pagesDiscovered: 0, pagesVisited: 0, pagesBlocked: 0, pagesFailed: 0 },
-              files: [],
-              statistics: { discovered: 0, downloadable: 0, inaccessible: 0, unsupported: 0, totalSize: 0 },
-              availableQualities: [],
-              message: "Invalid URL format. Please provide a valid http or https URL.",
-              details: {
-                accessStatus: "UNKNOWN",
-                httpStatus: null,
-                finalUrl: "",
-                contentType: null,
-                contentLength: null,
-                redirectCount: 0,
-                robotsStatus: null,
-                serverHeaders: {},
-                tlsValid: false,
-                dnsResolved: false,
-                crawlStarted: false,
-              },
-              warnings: [],
-            },
-          },
-          { status: 200 }
-        );
-      }
+    const originalResult = await analyzeUrl(url);
 
+    if (hasResults(originalResult)) {
+      return NextResponse.json({ success: true, type: "analysis", data: originalResult });
+    }
+
+    const { title: showTitle, season } = extractShowInfo(url, originalResult.title);
+
+    if (!showTitle || showTitle.length < 2) {
+      return NextResponse.json({ success: true, type: "analysis", data: originalResult });
+    }
+
+    const fallbackPromises = FALLBACK_SITES.map(async (site) => {
+      const fallbackUrl = site.buildUrl(showTitle, season);
+      if (!fallbackUrl) return null;
       try {
-        const result = await analyzeUrl(url);
-
-        const hasResults = result.status === "MEDIA_FOUND" && result.files.some((f) => f.downloadable);
-
-        if (hasResults) {
-          return NextResponse.json({
-            success: true,
-            type: "analysis",
-            data: result,
-          });
+        const result = await analyzeUrl(fallbackUrl);
+        if (hasResults(result)) {
+          return { name: site.name, url: fallbackUrl, result };
         }
+      } catch {}
+      return null;
+    });
 
-        const { title: showTitle, season } = extractFallbackInfo(url, result.title);
+    const settled = await Promise.allSettled(fallbackPromises);
+    const winners = settled
+      .filter((s) => s.status === "fulfilled" && s.value)
+      .map((s) => (s as PromiseFulfilledResult<any>).value);
 
-        if (!showTitle || showTitle.length < 2) {
-          return NextResponse.json({
-            success: true,
-            type: "analysis",
-            data: {
-              ...result,
-              warnings: [
-                ...result.warnings,
-                {
-                  code: "NO_FALLBACK",
-                  message: "Could not determine show title for fallback search.",
-                },
-              ],
+    if (winners.length > 0) {
+      const best = winners[0];
+      return NextResponse.json({
+        success: true,
+        type: "analysis",
+        data: {
+          ...best.result,
+          originalUrl: url,
+          warnings: [
+            ...(originalResult.warnings || []),
+            {
+              code: "FALLBACK_USED",
+              message: `No results on ${new URL(url).hostname}. Found ${best.result.files.filter((f: any) => f.downloadable).length} file(s) on ${best.name}.`,
             },
-          });
-        }
-
-        const fallbackResults: Array<{ name: string; url: string; result: any }> = [];
-
-        const fallbackPromises = FALLBACK_SITES.map(async (site) => {
-          const fallbackUrl = site.buildUrl(showTitle, season);
-          if (!fallbackUrl) return null;
-          try {
-            const fallbackResult = await analyzeUrl(fallbackUrl);
-            const hasFallbackResults =
-              fallbackResult.status === "MEDIA_FOUND" &&
-              fallbackResult.files.some((f) => f.downloadable);
-            if (hasFallbackResults) {
-              return { name: site.name, url: fallbackUrl, result: fallbackResult };
-            }
-          } catch {
-            // ignore fallback errors
-          }
-          return null;
-        });
-
-        const settled = await Promise.allSettled(fallbackPromises);
-        for (const s of settled) {
-          if (s.status === "fulfilled" && s.value) {
-            fallbackResults.push(s.value);
-          }
-        }
-
-        if (fallbackResults.length > 0) {
-          const best = fallbackResults[0];
-          return NextResponse.json({
-            success: true,
-            type: "analysis",
-            data: {
-              ...best.result,
-              originalUrl: url,
-              warnings: [
-                ...(result.warnings || []),
-                {
-                  code: "FALLBACK_USED",
-                  message: `No results found on ${new URL(url).hostname}. Found ${best.result.files.filter((f: any) => f.downloadable).length} file(s) on ${best.name} instead.`,
-                },
-              ],
-            },
-          });
-        }
-
-        const triedSites = FALLBACK_SITES.map((s) => s.name).join(", ");
-        return NextResponse.json({
-          success: true,
-          type: "analysis",
-          data: {
-            ...result,
-            warnings: [
-              ...(result.warnings || []),
-              {
-                code: "NO_FALLBACK_RESULTS",
-                message: `No downloadable content found on this site or fallback sources (${triedSites}). The content may be behind authentication, dynamically loaded, or not available.`,
-              },
-            ],
-          },
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Analysis failed";
-        console.error("Analysis error:", message);
-
-        return NextResponse.json({
-          success: true,
-          type: "analysis",
-          data: {
-            jobId: "error",
-            status: "BLOCKED",
-            accessStatus: "UNKNOWN",
-            domain: "",
-            originalUrl: url,
-            finalUrl: "",
-            title: null,
-            description: null,
-            thumbnail: null,
-            crawl: { pagesDiscovered: 0, pagesVisited: 0, pagesBlocked: 0, pagesFailed: 0 },
-            files: [],
-            statistics: { discovered: 0, downloadable: 0, inaccessible: 0, unsupported: 0, totalSize: 0 },
-            availableQualities: [],
-            message: `Analysis failed: ${message}`,
-            details: {
-              accessStatus: "UNKNOWN",
-              httpStatus: null,
-              finalUrl: "",
-              contentType: null,
-              contentLength: null,
-              redirectCount: 0,
-              robotsStatus: null,
-              serverHeaders: {},
-              tlsValid: false,
-              dnsResolved: false,
-              crawlStarted: false,
-            },
-            warnings: [],
-          },
-        });
-      }
+          ],
+        },
+      });
     }
 
-    return NextResponse.json(
-      { error: "URL is required" },
-      { status: 400 }
-    );
+    const triedSites = [new URL(url).hostname, ...FALLBACK_SITES.map((s) => s.name)].join(", ");
+    return NextResponse.json({
+      success: true,
+      type: "analysis",
+      data: {
+        ...originalResult,
+        warnings: [
+          ...(originalResult.warnings || []),
+          {
+            code: "NO_FALLBACK_RESULTS",
+            message: `No downloadable content found on ${triedSites}. The content may be behind authentication or not publicly available.`,
+          },
+        ],
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Analysis failed";
-    console.error("Analysis error:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function buildErrorResult(url: string, message: string): AnalysisResult {
+  return {
+    jobId: "error",
+    status: "BLOCKED",
+    accessStatus: "UNKNOWN",
+    domain: "",
+    originalUrl: url,
+    finalUrl: "",
+    title: null,
+    description: null,
+    thumbnail: null,
+    crawl: { pagesDiscovered: 0, pagesVisited: 0, pagesBlocked: 0, pagesFailed: 0 },
+    files: [],
+    statistics: { discovered: 0, downloadable: 0, inaccessible: 0, unsupported: 0, totalSize: 0 },
+    availableQualities: [],
+    message,
+    details: {
+      accessStatus: "UNKNOWN",
+      httpStatus: null,
+      finalUrl: "",
+      contentType: null,
+      contentLength: null,
+      redirectCount: 0,
+      robotsStatus: null,
+      serverHeaders: {},
+      tlsValid: false,
+      dnsResolved: false,
+      crawlStarted: false,
+    },
+    warnings: [],
+  };
 }

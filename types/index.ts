@@ -374,3 +374,75 @@ export type HostLinkResolveResult =
       reason: string;
       resolutionLog?: string[];
     };
+
+export type ResolutionJobStatus = "queued" | "analyzing" | "resolving" | "completed" | "failed" | "ready";
+
+export type EpisodeResolveStatus = "queued" | "resolving" | "resolved" | "failed";
+
+export interface EpisodeState {
+  name: string;
+  url: string;
+  status: EpisodeResolveStatus;
+  resolvedUrl?: string;
+  error?: string;
+}
+
+export interface ResolutionJob {
+  jobId: string;
+  originalUrl: string;
+  status: ResolutionJobStatus;
+  total: number;
+  current: number;
+  episodes: EpisodeState[];
+  result: AnalysisResult | null;
+  createdAt: number;
+}
+
+export interface SpeedTestSite {
+  name: string;
+  status: "pending" | "resolving" | "resolved" | "failed";
+  responseTimeMs?: number;
+  url?: string;
+}
+
+export interface ResolutionProgressEvent {
+  type: "phase" | "episode_start" | "episode_complete" | "speed_test" | "result" | "error";
+  jobId: string;
+  phase?: ResolutionJobStatus;
+  message?: string;
+  current?: number;
+  total?: number;
+  episodeName?: string;
+  episodeStatus?: EpisodeResolveStatus;
+  resolvedUrl?: string;
+  error?: string;
+  speedTest?: {
+    status: "testing" | "winner";
+    sites?: SpeedTestSite[];
+    winner?: { name: string; url: string; responseTimeMs: number };
+  };
+  result?: AnalysisResult;
+}
+
+export interface CrawlEvent {
+  type: "crawl_started" | "crawl_progress" | "crawl_complete" | "crawl_failed";
+  jobId: string;
+  total?: number;
+  current?: number;
+  message?: string;
+  crawlResult?: AnalysisResult;
+}
+
+export interface ResolutionEvent {
+  type: "resolution_started" | "episode_resolving" | "episode_resolved" | "episode_failed" | "resolution_complete";
+  jobId: string;
+  index?: number;
+  total?: number;
+  episode?: string;
+  episodeId?: string;
+  downloadUrl?: string;
+  filename?: string;
+  reason?: string;
+  resolved?: number;
+  failed?: number;
+}
