@@ -175,7 +175,7 @@ export interface AnalysisResult {
   statistics: FileStats;
   availableQualities: Quality[];
   message: string;
-  details: AccessDiagnostics;
+  details?: AccessDiagnostics;
   warnings: AnalysisWarning[];
 }
 
@@ -442,6 +442,8 @@ export interface ResolutionEvent {
   episodeId?: string;
   downloadUrl?: string;
   filename?: string;
+  mimeType?: string;
+  contentLength?: number;
   reason?: string;
   resolved?: number;
   failed?: number;

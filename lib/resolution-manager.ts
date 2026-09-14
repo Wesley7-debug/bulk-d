@@ -9,7 +9,7 @@ function getConcurrency(): number {
     const parsed = parseInt(envVal, 10);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
-  return 10;
+  return 24;
 }
 
 export async function resolveEpisodes(
@@ -84,6 +84,8 @@ export async function resolveEpisodes(
             episodeId,
             downloadUrl: staticResult.url,
             filename: staticResult.filename,
+            mimeType: staticResult.mimeType,
+            contentLength: staticResult.size,
           } as ResolutionEvent);
 
           resolvedCount++;
@@ -124,6 +126,8 @@ export async function resolveEpisodes(
             episodeId,
             downloadUrl: hostResult.finalUrl,
             filename: hostResult.filename,
+            mimeType: hostResult.contentType,
+            contentLength: hostResult.contentLength,
           } as ResolutionEvent);
 
           resolvedCount++;

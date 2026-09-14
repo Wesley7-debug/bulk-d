@@ -16,7 +16,7 @@ const EPISODE_NUMBERING = [
   /\bchapter[\s._-]*\d+/i,
 ];
 
-const MEDIA_EXTENSIONS = /\.(mkv|mp4|avi|mov|wmv|flv|webm|mp3|wav|flac|aac|zip|rar|7z|pdf)(?:\?[^"'\s]*)?$/i;
+const MEDIA_EXTENSIONS = /\.(mkv|mp4|avi|mov|wmv|flv|webm|mp3|wav|flac|aac|zip|rar|7z|pdf)(?:\.html)?(?:\?[^"'\s]*)?$/i;
 
 const LOCKER_KEYWORDS = [
   "locker", "share", "drive", "upload", "cdn", "download",

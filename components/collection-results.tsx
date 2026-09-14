@@ -162,6 +162,8 @@ interface EpisodeState {
   status: "queued" | "resolving" | "resolved" | "failed";
   downloadUrl?: string;
   filename?: string;
+  mimeType?: string;
+  contentLength?: number;
   error?: string;
 }
 
@@ -191,54 +193,60 @@ function ErrorStateDisplay({ analysis }: { analysis: AnalysisResult }) {
 
           <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 space-y-3">
             <h3 className="text-sm font-medium text-gray-300">Diagnostics</h3>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="flex items-center gap-2">
-                <span className={analysis.details.dnsResolved ? "text-green-400" : "text-red-400"}>
-                  {analysis.details.dnsResolved ? "\u2713" : "\u2716"}
-                </span>
-                <span className="text-gray-400">DNS Resolution</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={analysis.details.tlsValid ? "text-green-400" : "text-red-400"}>
-                  {analysis.details.tlsValid ? "\u2713" : "\u2716"}
-                </span>
-                <span className="text-gray-400">HTTPS Connection</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={analysis.details.httpStatus && analysis.details.httpStatus < 400 ? "text-green-400" : "text-red-400"}>
-                  {analysis.details.httpStatus && analysis.details.httpStatus < 400 ? "\u2713" : "\u2716"}
-                </span>
-                <span className="text-gray-400">
-                  HTTP {analysis.details.httpStatus || "N/A"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={analysis.details.crawlStarted ? "text-green-400" : "text-red-400"}>
-                  {analysis.details.crawlStarted ? "\u2713" : "\u2716"}
-                </span>
-                <span className="text-gray-400">Page Content Inspected</span>
-              </div>
-            </div>
+            {analysis.details ? (
+              <>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className={analysis.details.dnsResolved ? "text-green-400" : "text-red-400"}>
+                      {analysis.details.dnsResolved ? "\u2713" : "\u2716"}
+                    </span>
+                    <span className="text-gray-400">DNS Resolution</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={analysis.details.tlsValid ? "text-green-400" : "text-red-400"}>
+                      {analysis.details.tlsValid ? "\u2713" : "\u2716"}
+                    </span>
+                    <span className="text-gray-400">HTTPS Connection</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={analysis.details.httpStatus && analysis.details.httpStatus < 400 ? "text-green-400" : "text-red-400"}>
+                      {analysis.details.httpStatus && analysis.details.httpStatus < 400 ? "\u2713" : "\u2716"}
+                    </span>
+                    <span className="text-gray-400">
+                      HTTP {analysis.details.httpStatus || "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={analysis.details.crawlStarted ? "text-green-400" : "text-red-400"}>
+                      {analysis.details.crawlStarted ? "\u2713" : "\u2716"}
+                    </span>
+                    <span className="text-gray-400">Page Content Inspected</span>
+                  </div>
+                </div>
 
-            {analysis.details.finalUrl && analysis.details.finalUrl !== analysis.originalUrl && (
-              <div className="text-xs text-gray-500">
-                <span className="text-gray-400">Final URL: </span>
-                <span className="break-all">{analysis.details.finalUrl}</span>
-              </div>
-            )}
+                {analysis.details.finalUrl && analysis.details.finalUrl !== analysis.originalUrl && (
+                  <div className="text-xs text-gray-500">
+                    <span className="text-gray-400">Final URL: </span>
+                    <span className="break-all">{analysis.details.finalUrl}</span>
+                  </div>
+                )}
 
-            {analysis.details.robotsStatus && (
-              <div className="text-xs text-gray-500">
-                <span className="text-gray-400">robots.txt: </span>
-                <span>Status {analysis.details.robotsStatus}</span>
-              </div>
-            )}
+                {analysis.details.robotsStatus && (
+                  <div className="text-xs text-gray-500">
+                    <span className="text-gray-400">robots.txt: </span>
+                    <span>Status {analysis.details.robotsStatus}</span>
+                  </div>
+                )}
 
-            {Object.keys(analysis.details.serverHeaders).length > 0 && (
-              <div className="text-xs text-gray-500">
-                <span className="text-gray-400">Server: </span>
-                <span>{analysis.details.serverHeaders["server"] || "Unknown"}</span>
-              </div>
+                {Object.keys(analysis.details.serverHeaders).length > 0 && (
+                  <div className="text-xs text-gray-500">
+                    <span className="text-gray-400">Server: </span>
+                    <span>{analysis.details.serverHeaders["server"] || "Unknown"}</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-gray-500">Diagnostics unavailable</p>
             )}
           </div>
 
@@ -325,6 +333,8 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
                 status: "resolved",
                 downloadUrl: event.downloadUrl,
                 filename: event.filename,
+                mimeType: event.mimeType,
+                contentLength: event.contentLength,
               });
             }
             return next;
@@ -378,10 +388,13 @@ function SuccessStateDisplay({ analysis, jobId }: { analysis: AnalysisResult; jo
       resolutionInitiated.current = true;
       startResolution();
     }
+  }, [jobId, downloadableFiles.length]);
+
+  useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
     };
-  }, [jobId, downloadableFiles.length, startResolution]);
+  }, []);
 
   useEffect(() => {
     const currentIds = downloadableFiles.map((f) => getFileId(f)).sort().join(",");

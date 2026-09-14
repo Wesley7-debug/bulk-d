@@ -17,7 +17,16 @@ import {
 import { detectHostLandingPage } from "./page-classifier";
 import { logger } from "../lib/logger";
 
-const MEDIA_EXT_REGEX = /\.(mp4|webm|mkv|avi|mov|wmv|flv|webm|mp3|wav|flac|aac|ogg|m4a|zip|rar|7z|pdf)(?:\?[^"'\s]*)?$/i;
+const MEDIA_EXT_REGEX = /\.(mp4|webm|mkv|avi|mov|wmv|flv|mp3|wav|flac|aac|ogg|m4a|zip|rar|7z|pdf)(?:\.html)?(?:\?[^"'\s]*)?$/i;
+
+function isMediaTargetUrl(url: string): boolean {
+  try {
+    return MEDIA_EXT_REGEX.test(new URL(url).pathname);
+  } catch {
+    return MEDIA_EXT_REGEX.test(url);
+  }
+}
+
 const RESOLVER_OVERALL_TIMEOUT_MS = Math.max(HEADLESS_TIMEOUT_MS + 15_000, 45_000);
 const HTML_CONTENT_TYPES = ["text/html", "application/xhtml+xml"];
 const ERROR_CONTENT_TYPES = ["application/json", "text/plain", "application/xml", "text/xml"];
@@ -83,15 +92,23 @@ function isVerifiedMediaResponse(contentType: string, contentDisposition: string
 
 function classifyHtmlBody(bodyText: string): HttpInspection["classification"] {
   const lower = bodyText.toLowerCase();
+
   if (/\b(captcha|recaptcha|hcaptcha|cloudflare|challenge|verify you are human|checking your browser)\b/.test(lower)) {
     return "challenge";
   }
-  if (/\b(sign in|log in|login|required authentication|account required|password)\b/.test(lower)) {
+
+  const hasLogin = /\b(sign\s*in|log\s*in|login)\b/.test(lower);
+  const hasCredentials = /\b(password|username|email)\b/.test(lower);
+  const hasExplicitAuthRequirement = /\b(authentication required|required authentication|account required|members? only)\b/.test(lower);
+
+  if (hasExplicitAuthRequirement || (hasLogin && hasCredentials)) {
     return "login";
   }
+
   if (/\b(not found|file removed|expired|server error|access denied|forbidden)\b/.test(lower)) {
     return "error";
   }
+
   return "html_intermediary";
 }
 
@@ -174,7 +191,16 @@ async function inspectHttpResponse(
 
     if (isHtmlContentType(contentType)) {
       const bodyText = await response.text();
-      const classification = classifyHtmlBody(bodyText);
+
+      const rawClassification = classifyHtmlBody(bodyText);
+
+      const mediaTarget = isMediaTargetUrl(finalUrl);
+
+      const classification: HttpInspection["classification"] =
+        mediaTarget && (rawClassification === "login" || rawClassification === "challenge")
+          ? "html_intermediary"
+          : rawClassification;
+
       return {
         url: finalUrl,
         status: response.status,
@@ -199,7 +225,11 @@ async function inspectHttpResponse(
           head.startsWith("<?xml")
         ) {
           const bodyText = bodyBytes.toString("utf-8");
-          const classification = classifyHtmlBody(bodyText);
+          const rawClassification = classifyHtmlBody(bodyText);
+          const classification: HttpInspection["classification"] =
+            (rawClassification === "login" || rawClassification === "challenge")
+              ? "html_intermediary"
+              : rawClassification;
           return {
             url: finalUrl,
             status: response.status,
@@ -822,12 +852,15 @@ async function resolveViaHeadless(
 
     await page.waitForTimeout(2000);
 
-    const pageClassification = await page.evaluate(() => {
+    let pageClassification = await page.evaluate(() => {
       const text = document.body?.textContent?.toLowerCase() || "";
       if (/\b(captcha|recaptcha|hcaptcha|cloudflare|challenge|verify you are human|checking your browser)\b/.test(text)) {
         return "challenge_detected";
       }
-      if (/\b(sign in|log in|login|required authentication|account required|password)\b/.test(text)) {
+      const hasLogin = /\b(sign\s*in|log\s*in|login)\b/.test(text);
+      const hasCredentials = /\b(password|username|email)\b/.test(text);
+      const hasAuthRequirement = /\b(authentication required|required authentication|account required|members? only)\b/.test(text);
+      if (hasAuthRequirement || (hasLogin && hasCredentials)) {
         return "login_required";
       }
       if (/\b(not found|file removed|expired|server error|access denied|forbidden)\b/.test(text)) {
@@ -836,6 +869,13 @@ async function resolveViaHeadless(
       return "html_intermediary";
     }).catch(() => "html_intermediary");
     logger.log(jobId, "RESOLVE", `classification=${pageClassification}`);
+
+    const mediaTarget = isMediaTargetUrl(landingUrl) || isMediaTargetUrl(page.url());
+    if (mediaTarget && (pageClassification === "login_required" || pageClassification === "challenge_detected")) {
+      logger.log(jobId, "RESOLVE", `media_target_override classification=${pageClassification} url=${page.url()}`);
+      pageClassification = "html_intermediary";
+    }
+
     if (pageClassification !== "html_intermediary") {
       return fail(pageClassification);
     }
@@ -881,19 +921,18 @@ async function resolveViaHeadless(
     }
 
     // ===== CTA CLICKING WITH DOWNLOAD EVENT RACING =====
-    const clicked = await clickDownloadCta(page, landingUrl, jobId, resolutionLog);
+    // IMPORTANT: Start listening BEFORE clicking.
+    // A real download can fire immediately after the click.
+    const downloadPromise = page.waitForEvent("download", { timeout: DOWNLOAD_EVENT_TIMEOUT_MS }).catch(() => null);
+
+    const popupPromise = page.waitForEvent("popup", { timeout: 1500 }).catch(() => null);
+
+    const clicked = await clickDownloadCta(page, page.url(), jobId, resolutionLog);
     if (!clicked) {
       return fail("no_download_cta");
     }
     hopCount++;
 
-    // ===== RACE: download event vs navigation vs media response =====
-    const downloadPromise = page.waitForEvent("download", { timeout: DOWNLOAD_EVENT_TIMEOUT_MS }).catch(() => null);
-
-    // Wait a moment for the click to take effect
-    await page.waitForTimeout(1000);
-
-    // Wait for either download event or navigation, whichever comes first
     const download = await downloadPromise;
 
     if (download) {
@@ -963,11 +1002,12 @@ async function resolveViaHeadless(
           }
         }
 
-        // Try clicking again on the new page
+        // Try clicking again on the new page — listen BEFORE clicking
+        const download2Promise = page.waitForEvent("download", { timeout: DOWNLOAD_EVENT_TIMEOUT_MS }).catch(() => null);
         const clicked2 = await clickDownloadCta(page, currentUrl, jobId, resolutionLog);
         if (clicked2) {
           hopCount++;
-          const download2 = await page.waitForEvent("download", { timeout: DOWNLOAD_EVENT_TIMEOUT_MS }).catch(() => null);
+          const download2 = await download2Promise;
           if (download2) {
             const cdnUrl2 = download2.url();
             resolutionLog.push(`RESOLVE strategy=headless hop=${hopCount} status=ok download_event_url=${cdnUrl2.substring(0, 150)}`);
@@ -1114,6 +1154,46 @@ async function clickDownloadCta(
   jobId: string,
   resolutionLog: string[]
 ): Promise<boolean> {
+  const mediaElements = await page.$$('a[href], button[data-href], [role="button"][data-href]');
+  const mediaCandidates: Array<{
+    element: import("playwright").ElementHandle;
+    url: string;
+    score: number;
+  }> = [];
+
+  for (const element of mediaElements) {
+    const href = (await element.getAttribute("href")) || "";
+    const dataHref = (await element.getAttribute("data-href")) || "";
+    const candidate = dataHref || href;
+    if (!candidate) continue;
+
+    let resolved: string;
+    try { resolved = new URL(candidate, pageUrl).href; } catch { continue; }
+
+    if (!isMediaTargetUrl(resolved)) continue;
+
+    let score = 0;
+    if (/\.mkv(?:[?#]|$)/i.test(resolved)) score += 100;
+    if (/\.(mp4|webm|avi|mov|m4v)(?:[?#]|$)/i.test(resolved)) score += 90;
+    if (/\.(mp3|wav|flac|aac|ogg|m4a)(?:[?#]|$)/i.test(resolved)) score += 80;
+    if (/download/i.test(candidate)) score += 20;
+
+    mediaCandidates.push({ element, url: resolved, score });
+  }
+
+  mediaCandidates.sort((a, b) => b.score - a.score);
+
+  if (mediaCandidates.length > 0) {
+    const best = mediaCandidates[0];
+    logger.log(jobId, "RESOLVE", `strategy=headless media_target_priority url=${best.url.substring(0, 150)} score=${best.score}`);
+    resolutionLog.push(`RESOLVE strategy=headless media_target_priority url=${best.url}`);
+    try {
+      await best.element.evaluate((e: Element) => { (e as HTMLElement).click(); });
+      resolutionLog.push(`RESOLVE strategy=headless clicked_media_target`);
+      return true;
+    } catch { /* Continue to normal CTA handling */ }
+  }
+
   const allCtas = await page.$$('a, button, [role="button"], input[type="submit"], input[type="button"]');
 
   for (const el of allCtas) {
@@ -1159,18 +1239,9 @@ async function clickDownloadCta(
     }
   }
 
-  // Fallback: try any non-void, non-anchor link
-  const anyClickable = await page.$('a[href]:not([href^="#"]):not([href^="javascript:"])');
-  if (anyClickable) {
-    try {
-      const href = await anyClickable.getAttribute("href") || "";
-      await anyClickable.evaluate((e: Element) => { (e as HTMLElement).click(); });
-      resolutionLog.push(`RESOLVE strategy=headless clicked_first_link href="${href.substring(0, 60)}"`);
-      logger.log(jobId, "RESOLVE", `strategy=headless clicked_first_link href="${href.substring(0, 60)}"`);
-      return true;
-    } catch { /* skip */ }
-  }
-
+  // Do NOT click an arbitrary first link.
+  // Random navigation can send the resolver away from the actual
+  // media flow and produce false failures.
   return false;
 }
 
