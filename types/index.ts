@@ -78,6 +78,7 @@ export type DiscoveryMethod =
   | "download-attribute"
   | "media-elements"
   | "media-links"
+  | "download-button"
   | "anchor-links"
   | "iframe-src"
   | "script-injected"

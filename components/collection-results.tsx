@@ -411,6 +411,32 @@ function SuccessStateDisplay({ analysis }: { analysis: AnalysisResult }) {
         </Card>
       )}
 
+      {analysis.warnings && analysis.warnings.length > 0 && (
+        <Card>
+          <CardContent className="py-3 space-y-1">
+            {analysis.warnings.map((w, i) => {
+              const isFallback = w.code === "FALLBACK_USED";
+              const isNoResult = w.code === "NO_FALLBACK_RESULTS" || w.code === "NO_FALLBACK";
+              return (
+                <div
+                  key={i}
+                  className={`text-sm ${
+                    isFallback
+                      ? "text-blue-400"
+                      : isNoResult
+                        ? "text-yellow-400/80"
+                        : "text-gray-400"
+                  }`}
+                >
+                  {isFallback && <span className="mr-1">{"\u2139"}</span>}
+                  {w.message}
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+
       {derivedQualities.length > 1 && (
         <Card>
           <CardContent className="py-3">

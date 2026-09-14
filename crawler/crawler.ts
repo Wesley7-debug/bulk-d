@@ -1728,10 +1728,11 @@ class TargetedCrawler {
     const combined = `${resource.url} ${resource.name}`.toLowerCase();
     const sourcePageText = (resource.sourcePage || "").toLowerCase();
 
+    const titleTokens = targetTitle
+      .split(" ")
+      .filter((token) => token.length > 2);
+
     if (targetTitle) {
-      const titleTokens = targetTitle
-        .split(" ")
-        .filter((token) => token.length > 2);
       const titleMatches =
         titleTokens.length === 0 ||
         titleTokens.every(
@@ -1754,7 +1755,7 @@ class TargetedCrawler {
         return seasonPattern.test(combined);
       }
       if (titleTokens.length > 0 && titleTokens.every(
-        (token) =>
+        (token: string) =>
           resourceTitle.includes(token) ||
           combined.includes(token) ||
           sourcePageText.includes(token),

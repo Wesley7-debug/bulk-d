@@ -9,6 +9,7 @@ export function AnalyzeForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [focused, setFocused] = useState(false);
+  const [progress, setProgress] = useState("");
   const router = useRouter();
 
   const isUrl = (value: string): boolean => {
@@ -34,13 +35,37 @@ export function AnalyzeForm() {
 
     setLoading(true);
     setError("");
+    setProgress("Connecting to site...");
+
+    const progressTimer = setTimeout(() => {
+      setProgress("Crawling pages...");
+    }, 5000);
+
+    const progressTimer2 = setTimeout(() => {
+      setProgress("Resolving download links...");
+    }, 15000);
+
+    const timeoutTimer = setTimeout(() => {
+      setLoading(false);
+      setError("Analysis timed out after 45s. The site may be slow or unreachable. Try a different URL.");
+      setProgress("");
+    }, 45000);
 
     try {
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 45000);
+
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: input.trim() }),
+        signal: controller.signal,
       });
+
+      clearTimeout(fetchTimer);
+      clearTimeout(progressTimer);
+      clearTimeout(progressTimer2);
+      clearTimeout(timeoutTimer);
 
       const data = await res.json();
 
@@ -51,7 +76,16 @@ export function AnalyzeForm() {
       sessionStorage.setItem("analyzeResult", JSON.stringify(data.data));
       router.push("/analyze");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
+      clearTimeout(progressTimer);
+      clearTimeout(progressTimer2);
+      clearTimeout(timeoutTimer);
+
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setError("Request timed out. The site may be slow or unreachable.");
+      } else {
+        setError(err instanceof Error ? err.message : "Something went wrong");
+      }
+      setProgress("");
     } finally {
       setLoading(false);
     }
@@ -115,6 +149,13 @@ export function AnalyzeForm() {
       {error && (
         <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
           {error}
+        </div>
+      )}
+
+      {progress && !error && (
+        <div className="flex items-center gap-2 px-1 text-xs text-gray-500">
+          <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
+          {progress}
         </div>
       )}
 
