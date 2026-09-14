@@ -106,7 +106,12 @@ export async function runSpeedTest(
     }
   });
 
-  const winner = await Promise.any(promises.filter(Boolean) as Promise<{ name: string; url: string; responseTimeMs: number; result: AnalysisResult }[]>);
+  const winner = await Promise.any(
+    promises.map(p => p.then(v => {
+      if (v === null) throw new Error("No result");
+      return v;
+    }))
+  ).catch(() => null);
 
   return { winner, sites };
 }
